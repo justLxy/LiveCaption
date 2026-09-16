@@ -136,7 +136,7 @@ final class AppModel: ObservableObject {
     }
     private func checkStable() {
         if liveHypothesis.isEmpty {
-            for text in segmenter.flushCarry() { enqueue(text) }
+            for text in segmenter.tick() { enqueue(text) }
         } else {
             for text in segmenter.ingest(liveHypothesis,final:false) { enqueue(text) }
         }
@@ -185,7 +185,7 @@ final class AppModel: ObservableObject {
         // Let EOF flush the true streaming recognizer and drain its final translation.
         for _ in 0..<100 { if asr?.process.isRunning != true { break }; try? await Task.sleep(nanoseconds:100_000_000) }
         asr?.terminate(); asr = nil
-        for text in segmenter.flushCarry(force:true) { enqueue(text) }
+        for text in segmenter.tick(force:true) { enqueue(text) }
         liveHypothesis = ""; partial = ""
         for _ in 0..<150 { if translationTask == nil { break }; try? await Task.sleep(nanoseconds:100_000_000) }
         if translationTask != nil {
