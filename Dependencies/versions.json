@@ -1,0 +1,21 @@
+{
+  "checked_at": "2026-09-16",
+  "nemo_release": "v0.1.0",
+  "nemo_archive_sha256": "f1dff4f9dd9c96214f8cb78b982812459132df8a4ad1a42409fd94de4a366244",
+  "llama_release": "b10991",
+  "hy_repo": "tencent/Hy-MT2-1.8B-GGUF",
+  "hy_revision": "a0c709d9fac510f2c807aa3af52872340dc37a4a",
+  "hy_sha256": "dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699",
+  "nemo_model_revision": "ebe59e5a817142986528bbbee5dba8db7b38ed50",
+  "nemo_model_sha256": "d9a01898d2a611c8764e23a1c2f45e70bbd5a425dc4de93692ac951dd603812d",
+  "sources": [
+    "https://github.com/NVIDIA/NeMo-Speech.cpp",
+    "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/tag/v0.1.0",
+    "https://github.com/NVIDIA/NeMo-Speech.cpp/blob/main/docs/sdk.md",
+    "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b",
+    "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF",
+    "https://github.com/ggml-org/llama.cpp/releases/tag/b10991",
+    "https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b"
+  ],
+  "asr_model": "nvidia/nemotron-speech-streaming-en-0.6b"
+}

@@ -1,0 +1,54 @@
+{
+  "status": "passed",
+  "requested_seconds": 20,
+  "started_utc": "2026-09-16T04:09:44.414445+00:00",
+  "app_pid": 11076,
+  "scope": "Actual Swift pipeline and Metal models; synthetic PCM at real-time speed; excludes hardware capture",
+  "samples": [
+    {
+      "wall_elapsed": 0.02,
+      "processes": [
+        {
+          "pid": 11076,
+          "rss_kb": 32,
+          "cpu_percent": 0.0
+        }
+      ],
+      "total_rss_kb": 32
+    },
+    {
+      "wall_elapsed": 15.07,
+      "processes": [
+        {
+          "pid": 11076,
+          "rss_kb": 89680,
+          "cpu_percent": 1.9
+        },
+        {
+          "pid": 11079,
+          "rss_kb": 1340832,
+          "cpu_percent": 1.0
+        },
+        {
+          "pid": 11080,
+          "rss_kb": 1029232,
+          "cpu_percent": 10.8
+        }
+      ],
+      "total_rss_kb": 2459744
+    }
+  ],
+  "elapsed_seconds": 30.08,
+  "transcript_directory": "/Users/lvxuanyi/Library/Application Support/LumaCaption/Transcripts/2026-09-16T04-09-44Z-C8B046",
+  "exit_code": 0,
+  "audio_seconds": 19.98,
+  "translated_segments": 6,
+  "errors": [],
+  "session_ended": true,
+  "translation_latency_seconds": {
+    "median": 0.14129751920700073,
+    "p95": 0.1607609987258911,
+    "max": 0.1607609987258911
+  },
+  "finished_utc": "2026-09-16T04:10:14.490345+00:00"
+}
