@@ -38,7 +38,9 @@ final class AppModel: ObservableObject {
     private let translator = Translator()
     private var journal: TranscriptJournal?
     private var segmenter = Segmenter()
-    private var liveHypothesis = ""
+    private var acceptASREvents = false
+    private var asrDrained = false
+    private var versions: [UUID: Int] = [:]
     private var pending: [CaptionSegment] = []
     private var translationTask: Task<Void,Never>?
     private var startupTask: Task<Void,Never>?
@@ -73,7 +75,7 @@ final class AppModel: ObservableObject {
         busy = true; stopping = false; generation = UUID(); let sessionID = generation
         firstPartial = true; lastAudio = 0; captureStarted = nil
         if !preserveHistory { history = CaptionHistory(); followLatest = true; english = ""; chinese = "" }
-        partial = ""; latency = ""; pending = []; segmenter = Segmenter(); liveHypothesis = ""
+        partial = ""; latency = ""; pending = []; segmenter = Segmenter(); acceptASREvents = true; asrDrained = false; versions = [:]
         startupTask = Task { [self] in
             do {
                 journal = try TranscriptJournal(root:transcripts)
@@ -84,7 +86,7 @@ final class AppModel: ObservableObject {
                 guard generation == sessionID else { return }
                 status = "正在加载 Nemotron English · Metal"
                 let bridge = try ASRProcess(resources:resources,log:journal!.directory.appendingPathComponent("asr.log"))
-                bridge.event = { [weak self] event in Task { @MainActor in
+                bridge.event = { [weak self] event in DispatchQueue.main.async {
                     guard let self, self.generation == sessionID else { return }
                     self.receive(event)
                 } }
@@ -119,40 +121,53 @@ final class AppModel: ObservableObject {
         }
     }
     private func receive(_ e:ASREvent) {
+        if e.type == "drained" { asrDrained = true; return }
+        guard acceptASREvents else { return }
         if e.type == "ready" { running = true; return }
         guard let text = e.text else { return }; lastAudio = e.audio ?? lastAudio
         if e.type == "partial" {
             if firstPartial && !text.isEmpty {
                 record(["type":"asr_first_partial","text":text,"audio_seconds":lastAudio,"capture_elapsed":captureStarted.map { Date().timeIntervalSince($0) } ?? 0]); firstPartial = false
             }
-            liveHypothesis = text; checkStable()
+            apply(segmenter.ingest(text, final:false, audio:lastAudio, utterance:e.utterance ?? 0))
         }
         if e.type == "final" {
             record(["type":"asr_final","text":text,"audio_seconds":lastAudio,"capture_elapsed":captureStarted.map { Date().timeIntervalSince($0) } ?? 0])
             firstPartial = true
-            for text in segmenter.ingest(text,final:true) { enqueue(text) }
-            liveHypothesis = ""; partial = segmenter.preview("")
+            apply(segmenter.ingest(text, final:true, audio:lastAudio, utterance:e.utterance ?? 0))
         }
     }
     private func checkStable() {
-        if liveHypothesis.isEmpty {
-            for text in segmenter.tick() { enqueue(text) }
-        } else {
-            for text in segmenter.ingest(liveHypothesis,final:false) { enqueue(text) }
-        }
-        partial = segmenter.preview(liveHypothesis)
+        apply(segmenter.tick())
     }
 
-    private func enqueue(_ text:String) {
-        guard !text.isEmpty else { return }
-        let segment = CaptionSegment(english:text)
-        record(["type":"english_segment","id":segment.id.uuidString,"text":text,"audio_seconds":lastAudio])
-        history.append(id:segment.id,english:text,limit:historyLimit)
-        pending.append(segment)
+    private func apply(_ changes: [SegmentChange]) {
+        for change in changes {
+            switch change {
+            case .remove(let id):
+                versions.removeValue(forKey:id)
+                pending.removeAll { $0.id == id }
+                history.remove(id)
+                if displayedID == id { english = ""; chinese = ""; displayedID = nil }
+                record(["type":"segment_removed", "id":id.uuidString])
+                do { try journal?.remove(id) } catch { fail(error.localizedDescription) }
+            case .upsert(let segment):
+                versions[segment.id] = segment.revision
+                pending.removeAll { $0.id == segment.id }
+                history.upsert(segment, limit:historyLimit)
+                if displayedID == segment.id { english = segment.english; chinese = "" }
+                record(["type":"english_segment", "id":segment.id.uuidString,
+                        "revision":segment.revision, "text":segment.english, "audio_seconds":lastAudio])
+                do { try journal?.upsert(segment) } catch { fail(error.localizedDescription) }
+                pending.append(segment)
+            }
+        }
+        partial = segmenter.preview
         if pending.count >= 12 { fail("翻译积压过多，已停止捕获；英文已保存在 transcript。请关闭其他高负载应用后重试。"); return }
         if pending.count > 2 { status = "翻译积压 \(pending.count) 段" }
-        if translationTask == nil { translateQueue() }
+        if translationTask == nil && !pending.isEmpty { translateQueue() }
     }
+    private var displayedID: UUID?
     private func translateQueue() {
         let sessionID = generation
         translationTask = Task {
@@ -161,15 +176,19 @@ final class AppModel: ObservableObject {
                 do {
                     let translated = try await translator.translate(segment.english,glossary:glossary)
                     guard generation == sessionID, !Task.isCancelled else { break }
+                    guard versions[segment.id] == segment.revision else { continue }
                     let elapsed = Date().timeIntervalSince(segment.created)
                     try journal?.translated(segment,chinese:translated,latency:elapsed)
                     // Publish one complete bilingual pair atomically, never per Chinese token.
                     history.translate(id:segment.id,chinese:translated)
+                    displayedID = segment.id
                     english = segment.english; chinese = translated; latency = String(format:"翻译 %.2f s",elapsed)
                 } catch {
                     if Task.isCancelled { break }
+                    guard generation == sessionID, versions[segment.id] == segment.revision else { continue }
                     record(["type":"translation_error","id":segment.id.uuidString,"english":segment.english,"error":error.localizedDescription])
                     history.translate(id:segment.id,chinese:"翻译暂不可用 · 英文已保存")
+                    displayedID = segment.id
                     english = segment.english; chinese = "翻译暂不可用 · 英文已保存"; status = error.localizedDescription
                 }
             }
@@ -183,10 +202,11 @@ final class AppModel: ObservableObject {
         await capture?.stop(); capture = nil
         asr?.finish()
         // Let EOF flush the true streaming recognizer and drain its final translation.
-        for _ in 0..<100 { if asr?.process.isRunning != true { break }; try? await Task.sleep(nanoseconds:100_000_000) }
+        for _ in 0..<100 { if asr == nil || (asr?.process.isRunning != true && asrDrained) { break }; try? await Task.sleep(nanoseconds:100_000_000) }
+        acceptASREvents = false
         asr?.terminate(); asr = nil
-        for text in segmenter.tick(force:true) { enqueue(text) }
-        liveHypothesis = ""; partial = ""
+        apply(segmenter.tick(force:true))
+        partial = ""
         for _ in 0..<150 { if translationTask == nil { break }; try? await Task.sleep(nanoseconds:100_000_000) }
         if translationTask != nil {
             record(["type":"translation_drain_timeout","remaining":pending.map(\.english)])

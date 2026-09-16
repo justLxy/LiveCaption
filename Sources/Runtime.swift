@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-struct ASREvent: Decodable { let type: String; let text: String?; let audio: Double? }
+struct ASREvent: Decodable { let type: String; let text: String?; let audio: Double?; let utterance: Int? }
 
 /// Serial pipe writer with a 2 s hard backlog bound. Overload stops visibly rather than dropping words silently.
 final class ASRProcess: @unchecked Sendable {
@@ -45,6 +45,7 @@ final class ASRProcess: @unchecked Sendable {
                     if buffer.count > 1_000_000 { self.failure?("ASR 输出协议异常"); break }
                 }
             } catch { self.failure?("读取识别结果失败：\(error.localizedDescription)") }
+            self.event?(ASREvent(type: "drained", text: nil, audio: nil, utterance: nil))
         }
     }
     func send(_ data: Data) {

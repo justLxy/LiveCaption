@@ -1,298 +1,183 @@
 import Foundation
+import NaturalLanguage
 
-/// Real-time caption segmentation using ASR signal prioritization.
-///
-/// Key insight from V1 analysis:
-/// - Partials are cumulative (ASR refines the same utterance)
-/// - Finals are new segments (committedKeys is reset)
-/// - Use remainder() to extract only new content beyond what's committed
-///
-/// Simplified architecture:
-/// - Explicit state machine (empty/accumulating/stable)
-/// - Minimal semantic checks (~15 words vs 150+)
-/// - Trust ASR final events as natural boundaries
-struct Segmenter {
-
-    // MARK: - State
-
-    private enum State {
-        case empty
-        case accumulating(buffer: String)
-        case stable(text: String, since: Date)
-    }
-
-    private var state = State.empty
-
-    /// Tracks committed words to detect revisions and extract new content
-    private var committedKeys: [String] = []
-
-    /// Carry-over buffer for incomplete phrases across finals
-    private var carry = ""
-    private var carrySince = Date.distantFuture
-
-    /// Current stable candidate (for partials)
-    private var candidate = ""
-    private var candidateSince = Date.distantFuture
-
-    // MARK: - Configuration
-
-    private let stabilityWindow: TimeInterval = 0.6
-    private let finalFlushDelay: TimeInterval = 1.8
-
-    // MARK: - Public API
-
-    mutating func ingest(_ text: String, final: Bool, now: Date = Date()) -> [String] {
-        // Check for ASR revision during partials
-        if !final && !committedKeys.isEmpty {
-            let keys = tokenize(text)
-            guard keys.count >= committedKeys.count,
-                  Array(keys.prefix(committedKeys.count)) == committedKeys else {
-                // Revision detected - reset and treat as new
-                return []
-            }
-        }
-
-        // Extract new content beyond what we've committed
-        let rest = remainder(text)
-
-        if final {
-            return handleFinal(rest, now: now)
-        } else {
-            return handlePartial(rest, now: now)
-        }
-    }
-
-    mutating func tick(now: Date = Date(), force: Bool = false) -> [String] {
-        guard !carry.isEmpty else { return [] }
-
-        let wait = canClose(carry) ? 2.2 : 4.0
-        guard force || now.timeIntervalSince(carrySince) >= wait else { return [] }
-
-        defer { carry = "" }
-        return [carry]
-    }
-
-    func preview(_ current: String) -> String {
-        guard !current.isEmpty else { return carry }
-        let snapshot = self
-        return join(carry, snapshot.remainder(current))
-    }
-
-    // MARK: - Private Handlers
-
-    private mutating func handlePartial(_ rest: String, now: Date) -> [String] {
-        guard !rest.isEmpty else { return [] }
-
-        // Find first closable boundary
-        guard let boundary = findBoundaries(in: rest).first(where: {
-            canClose(join(carry, String(rest[...$0])))
-        }) else {
-            candidate = ""
-            return []
-        }
-
-        let prefix = String(rest[...boundary])
-        let combined = join(carry, prefix)
-
-        // Check if candidate is stable
-        if candidate != combined {
-            candidate = combined
-            candidateSince = now
-            return []
-        }
-
-        // Check if stable long enough
-        let requiredWait = adjustedWaitTime(for: combined)
-        guard now.timeIntervalSince(candidateSince) >= requiredWait else { return [] }
-
-        // Commit this segment
-        let prefixTokens = prefix.split(whereSeparator: { $0.isWhitespace })
-        committedKeys += prefixTokens.map { normalize($0) }
-
-        carry = ""
-        candidate = ""
-        return [combined]
-    }
-
-    private mutating func handleFinal(_ rest: String, now: Date) -> [String] {
-        // Reset committed tracking at final boundary
-        committedKeys = []
-        candidate = ""
-
-        guard !rest.isEmpty else { return [] }
-
-        let combined = join(carry, rest)
-        carry = ""
-        var output: [String] = []
-        var start = combined.startIndex
-        let boundaries = findBoundaries(in: combined)
-
-        // Split at boundaries and extract complete phrases
-        for boundary in boundaries {
-            let after = combined.index(after: boundary)
-            let phrase = String(combined[start..<after]).trimmingCharacters(in: .whitespacesAndNewlines)
-
-            if canClose(phrase) {
-                output.append(phrase)
-                start = after
-            }
-        }
-
-        // Handle remainder
-        let remainder = String(combined[start...]).trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // If no boundaries found but text is complete, output it
-        // Or if boundaries were found but remainder is also complete, output remainder
-        if !remainder.isEmpty && canClose(remainder) {
-            output.append(remainder)
-        } else if !remainder.isEmpty {
-            // Save incomplete remainder as carry
-            carry = remainder
-        }
-
-        carrySince = now
-
-        return output
-    }
-
-    // MARK: - Helper Functions
-
-    /// Extract new content beyond what's been committed (mirrors V1's remainder())
-    private func remainder(_ text: String) -> String {
-        let tokens = text.split(whereSeparator: { $0.isWhitespace })
-        let keys = tokens.map { normalize($0) }
-
-        guard !committedKeys.isEmpty else {
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        // Check if ASR revised previous content
-        guard keys.count >= committedKeys.count,
-              Array(keys.prefix(committedKeys.count)) == committedKeys else {
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        guard tokens.count > committedKeys.count else { return "" }
-
-        return String(text[tokens[committedKeys.count].startIndex...])
-    }
-
-    /// Find sentence boundaries
-    private func findBoundaries(in text: String) -> [String.Index] {
-        text.indices.filter { i in
-            guard ".!?;".contains(text[i]) else { return false }
-            let next = text.index(after: i)
-            guard next == text.endIndex || text[next].isWhitespace else { return false }
-
-            if text[i] == "." {
-                // Skip decimals
-                if let prev = text.index(i, offsetBy: -1, limitedBy: text.startIndex),
-                   text[prev].isNumber {
-                    return false
-                }
-
-                // Skip common abbreviations
-                let token = String(text[...i]).split(whereSeparator: { $0.isWhitespace }).last.map(String.init)?.lowercased() ?? ""
-                let abbrevs = ["dr", "mr", "mrs", "ms", "prof", "inc", "ltd", "corp", "co", "e.g", "i.e", "etc"]
-                if abbrevs.contains(where: { token.contains($0) }) {
-                    return false
-                }
-            }
-
-            return true
-        }
-    }
-
-    /// Check if phrase can be closed (minimal semantic check)
-    private func canClose(_ text: String) -> Bool {
-        let words = tokenize(text)
-        guard !words.isEmpty else { return false }
-
-        // Trust ASR punctuation as sentence boundaries
-        if text.hasSuffix(".") || text.hasSuffix("!") || text.hasSuffix("?") {
-            return words.count >= 2
-        }
-
-        // No punctuation: check if last word is obviously incomplete
-        let lastWord = words.last!
-        let incomplete: Set<String> = ["a", "an", "the", "to", "of", "in", "on", "at", "and", "or", "but"]
-
-        return !incomplete.contains(lastWord)
-    }
-
-    /// Adaptive wait time based on content
-    private func adjustedWaitTime(for text: String) -> TimeInterval {
-        let words = tokenize(text)
-        let tokenCount = words.count
-
-        // Short phrases commit faster
-        if tokenCount <= 4 { return 0.4 }
-        if tokenCount <= 6 { return 0.5 }
-
-        // Check for complex structures
-        let lower = text.lowercased()
-        let hasComplexStructure = lower.contains("because") ||
-                                  lower.contains("although") ||
-                                  lower.contains("unless") ||
-                                  lower.contains(" if ") ||
-                                  lower.contains("which") ||
-                                  lower.contains("that ")
-
-        if hasComplexStructure && tokenCount > 10 { return 0.85 }
-        if hasComplexStructure { return 0.75 }
-
-        return 0.65
-    }
-
-    /// Join two text segments
-    private func join(_ left: String, _ right: String) -> String {
-        guard !left.isEmpty else { return right.trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard !right.isEmpty else { return left }
-
-        var lhs = left
-
-        // Remove trailing punctuation if left side can't close
-        if !canClose(lhs) {
-            while let c = lhs.last, ".!?;".contains(c) {
-                lhs.removeLast()
-            }
-        }
-
-        let leftTrimmed = lhs.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rightTrimmed = right.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Detect and prevent duplication at boundaries (e.g., "Well" appearing in both)
-        let leftWords = leftTrimmed.split(whereSeparator: { $0.isWhitespace })
-        let rightWords = rightTrimmed.split(whereSeparator: { $0.isWhitespace })
-
-        if let lastLeft = leftWords.last, let firstRight = rightWords.first,
-           normalize(lastLeft) == normalize(firstRight), leftWords.count == 1 {
-            // Left is just one word that duplicates first word of right - use right only
-            return rightTrimmed
-        }
-
-        return leftTrimmed + " " + rightTrimmed
-    }
-
-    /// Tokenize and normalize words
-    private func tokenize(_ text: String) -> [String] {
-        text.split(whereSeparator: { $0.isWhitespace })
-            .map { normalize($0) }
-            .filter { !$0.isEmpty }
-    }
-
-    /// Normalize word (lowercase, remove punctuation)
-    private func normalize(_ word: Substring) -> String {
-        String(word).lowercased().trimmingCharacters(in: .punctuationCharacters.union(.symbols))
+struct CaptionSegment: Identifiable, Equatable {
+    let id: UUID
+    let english: String
+    let created: Date
+    let revision: Int
+    let bufferedSeconds: Double
+    init(id: UUID = UUID(), english: String, created: Date = Date(), revision: Int = 0, bufferedSeconds: Double = 0) {
+        self.id = id; self.english = english; self.created = created; self.revision = revision; self.bufferedSeconds = bufferedSeconds
     }
 }
 
-// MARK: - Supporting Types
+enum SegmentChange {
+    case upsert(CaptionSegment)
+    case remove(UUID)
+}
 
-struct CaptionSegment: Identifiable {
-    let id = UUID()
-    let english: String
-    let created = Date()
+/// Acoustic utterances and translation segments deliberately have separate lifetimes.
+/// Only real decoder events establish stability. The timer may flush an endpoint,
+/// but can never confirm a partial. All clocks used for decisions are monotonic.
+struct Segmenter {
+    struct Configuration {
+        var confirmation: Double = 0.45
+        var maxWait: Double = 2.0
+    }
+    var configuration = Configuration()
+    private var carry = ""
+    private var carrySince: Double?
+    private var lead = ""
+    private var leadSince: Double?
+    private var active = ""
+    private var committed: [CaptionSegment] = []
+    private var previousWords: [String] = []
+    private var wordSince: [Double] = []
+    private var pendingSince: Double?
+    private var lastAudio: Double = -.infinity
+    private var currentUtterance: Int?
+
+    var preview: String {
+        let full = words(join(lead, active))
+        let used = committed.flatMap { words($0.english) }
+        // Never show the whole corrected hypothesis a second time below committed text.
+        if !used.isEmpty && !full.starts(with: used) { return "" }
+        return join(carry, full.dropFirst(used.count).joined(separator: " "))
+    }
+
+    mutating func ingest(_ text: String, final: Bool, audio: Double, utterance: Int,
+                         now: Double = ProcessInfo.processInfo.systemUptime) -> [SegmentChange] {
+        if let currentUtterance, utterance < currentUtterance { return [] }
+        var changes: [SegmentChange] = []
+        if currentUtterance != utterance {
+            // A missing final must not silently discard the previous hypothesis.
+            if !active.isEmpty { changes += finish(now: now) }
+            currentUtterance = utterance
+            lastAudio = -.infinity
+        } else if !final && audio <= lastAudio { return [] }
+        if active.isEmpty && committed.isEmpty && !text.isEmpty {
+            lead = carry; leadSince = carrySince; carry = ""
+            pendingSince = carrySince ?? now; carrySince = nil
+        }
+        active = canonical(text)
+        let full = words(join(lead, active))
+        var common = 0
+        while common < min(full.count, previousWords.count), full[common] == previousWords[common] { common += 1 }
+        wordSince = Array(wordSince.prefix(common)) + Array(repeating: now, count: full.count - common)
+        previousWords = full
+        lastAudio = max(lastAudio, audio)
+        if final {
+            changes += finish(now: now)
+            // Bridge advances utterance after every final; reject late/duplicate events.
+            currentUtterance = utterance + 1
+            lastAudio = -.infinity
+            return changes
+        }
+        let used = committed.flatMap { words($0.english) }
+        guard full.starts(with: used) else { return changes } // Reconcile authoritatively at final.
+        let remaining = Array(full.dropFirst(used.count))
+        guard !remaining.isEmpty else { return changes }
+        let stableCount = wordSince.dropFirst(used.count).prefix { now - $0 >= configuration.confirmation }.count
+        let boundaries = sentenceLengths(remaining.joined(separator: " "))
+        // Require a subsequent word: the end of a live hypothesis is especially revisable.
+        var count = boundaries.first { $0 <= stableCount && $0 < remaining.count }
+        if count == nil, now - (pendingSince ?? now) >= configuration.maxWait {
+            // Prefer a stable clause boundary after the budget, never an arbitrary
+            // word count/time slice. A long unpunctuated utterance waits for endpoint.
+            let available = min(stableCount, remaining.count - 1)
+            count = remaining.prefix(available).enumerated().first(where: { _, token in
+                guard let last = token.last else { return false }
+                return ",;:".contains(last)
+            }).map { $0.offset + 1 }
+        }
+        if let count {
+            let segment = CaptionSegment(english: remaining.prefix(count).joined(separator: " "), bufferedSeconds: max(0, now - (pendingSince ?? now)))
+            committed.append(segment); changes.append(.upsert(segment)); pendingSince = now
+        }
+        return changes
+    }
+
+    mutating func tick(now: Double = ProcessInfo.processInfo.systemUptime, force: Bool = false) -> [SegmentChange] {
+        if force {
+            var result = finish(now: now)
+            result += flushCarry(now:now)
+            return result
+        }
+        // Carry moves into the active hypothesis on the next utterance. Never flush
+        // it independently while the decoder is refining that joined hypothesis.
+        guard let since = carrySince, now - since >= configuration.maxWait else { return [] }
+        return flushCarry(now:now)
+    }
+
+    private mutating func finish(now: Double) -> [SegmentChange] {
+        let full = words(join(lead, active))
+        var offset = 0
+        var changes: [SegmentChange] = []
+        for (index, segment) in committed.enumerated() {
+            let tokens = words(segment.english)
+            if Array(full.dropFirst(offset)).starts(with: tokens) {
+                offset += tokens.count
+            } else {
+                // Keep unaffected segments and replace the entire affected suffix.
+                // This handles insertions/deletions across old boundaries without
+                // guessed word offsets, duplicated text, or stale translations.
+                let corrected = full.dropFirst(offset).joined(separator: " ")
+                if corrected.isEmpty { changes.append(.remove(segment.id)) }
+                else { changes.append(.upsert(CaptionSegment(id: segment.id, english: corrected,
+                                      created: segment.created, revision: segment.revision + 1, bufferedSeconds: segment.bufferedSeconds))) }
+                for obsolete in committed.dropFirst(index + 1) { changes.append(.remove(obsolete.id)) }
+                resetActive()
+                return changes
+            }
+        }
+        let tail = full.dropFirst(offset).joined(separator: " ")
+        var consumed = 0
+        let tailWords = words(tail)
+        for boundary in sentenceLengths(tail) {
+            let sentence = tailWords[consumed..<boundary].joined(separator: " ")
+            if !sentence.isEmpty { changes.append(.upsert(CaptionSegment(english: sentence, bufferedSeconds: max(0, now - (pendingSince ?? now))))) }
+            consumed = boundary
+        }
+        let remainder = tailWords.dropFirst(consumed).joined(separator: " ")
+        if !remainder.isEmpty {
+            carry = remainder
+            // Preserve the budget across repeated short, unpunctuated endpoints.
+            carrySince = leadSince ?? now
+        }
+        resetActive()
+        return changes
+    }
+
+    private mutating func resetActive() {
+        active = ""; lead = ""; leadSince = nil; committed = []; previousWords = []; wordSince = []; pendingSince = nil
+    }
+    private mutating func flushCarry(now: Double) -> [SegmentChange] {
+        guard !carry.isEmpty else { return [] }
+        defer { carry = ""; carrySince = nil }
+        return [.upsert(CaptionSegment(english: carry, bufferedSeconds: max(0, now - (carrySince ?? now))))]
+    }
+    private func words(_ text: String) -> [String] { text.split(whereSeparator: \.isWhitespace).map(String.init) }
+    private func canonical(_ text: String) -> String { words(text).joined(separator: " ") }
+    private func join(_ left: String, _ right: String) -> String { canonical(left + " " + right) }
+
+    /// Apple's language tokenizer handles sentence boundaries and abbreviations;
+    /// no course vocabulary, conjunction lists, or substring abbreviation rules.
+    private func sentenceLengths(_ text: String) -> [Int] {
+        guard !text.isEmpty else { return [] }
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.setLanguage(.english); tokenizer.string = text
+        var result: [Int] = []
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            let sentence = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'”’)]}"))
+            if let last = sentence.last, ".!?".contains(last) {
+                result.append(words(String(text[..<range.upperBound])).count)
+            }
+            return true
+        }
+        return result
+    }
 }
 
 final class TranscriptJournal {
@@ -316,9 +201,43 @@ final class TranscriptJournal {
         try json.write(contentsOf: data); try json.synchronize()
     }
 
+    private var order: [UUID] = []
+    private var segments: [UUID: CaptionSegment] = [:]
+    private var translations: [UUID: String] = [:]
+
+    func upsert(_ segment: CaptionSegment) throws {
+        let replacing = segments[segment.id] != nil
+        if !replacing { order.append(segment.id) }
+        segments[segment.id] = segment
+        translations.removeValue(forKey: segment.id)
+        // Normally append completed pairs. A correction rebuilds the
+        // current transcript so an obsolete bilingual pair cannot remain there.
+        if replacing { try rebuildText() }
+    }
+    func remove(_ id: UUID) throws {
+        segments.removeValue(forKey:id); translations.removeValue(forKey:id)
+        order.removeAll { $0 == id }; try rebuildText()
+    }
+    private func pair(_ segment: CaptionSegment, _ chinese: String) -> String {
+        "[\(ISO8601DateFormatter().string(from: segment.created))]\nEnglish: \(segment.english)\n中文: \(chinese)\n\n"
+    }
+    private func rebuildText() throws {
+        let contents = order.compactMap { id -> String? in
+            guard let segment = segments[id], let chinese = translations[id] else { return nil }
+            return pair(segment, chinese)
+        }.joined()
+        try text.truncate(atOffset:0); try text.seek(toOffset:0)
+        try text.write(contentsOf:Data(contents.utf8)); try text.synchronize()
+    }
     func translated(_ segment: CaptionSegment, chinese: String, latency: Double) throws {
-        try record(["type":"translation", "id":segment.id.uuidString,"english":segment.english,"chinese":chinese,"latency_seconds":latency])
-        try text.write(contentsOf: Data("[\(ISO8601DateFormatter().string(from: segment.created))]\nEnglish: \(segment.english)\n中文: \(chinese)\n\n".utf8)); try text.synchronize()
+        guard segments[segment.id]?.revision == segment.revision else { return }
+        try record(["type":"translation", "id":segment.id.uuidString,"revision":segment.revision,
+                    "english":segment.english,"chinese":chinese,"latency_seconds":latency,
+                    "segmentation_wait_seconds":segment.bufferedSeconds,
+                    "buffer_and_translation_seconds":segment.bufferedSeconds + latency])
+        translations[segment.id] = chinese
+        if segment.revision > 0 { try rebuildText() }
+        else { try text.write(contentsOf: Data(pair(segment, chinese).utf8)); try text.synchronize() }
     }
 
     deinit { try? json.close(); try? text.close() }

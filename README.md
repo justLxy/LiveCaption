@@ -44,7 +44,7 @@
 
 ## 技术细节
 
-- **断句策略**：ASR 的 final 事件是音频分段边界，不等同于完整句子。断句引擎会检测悬空词、未闭合从句、对话性短语，跨 final 续接未完成片段，在语法稳定后才提交翻译
+- **断句策略**：ASR 的 final 事件是音频分段边界，不等同于完整句子。使用真实 ASR 更新中的稳定前缀、模型标点和 endpoint 组合判断；无句末标点的 final 可跨段续接，并由统一等待预算兜底。不使用课程关键词或句型特例
 - **流式处理**：ASR 使用真正的 cache-aware streaming API，持续接收 20ms PCM 帧；翻译仅处理稳定片段
 - **Metal 加速**：ASR 和翻译模型均使用 Metal GPU 加速
 
@@ -76,5 +76,18 @@ Tests/run-tests.sh
 ## 注意事项
 
 - 本机 ad-hoc 签名，非 Developer ID 公证签名
-- 断句引擎基于保守的标点与语法规则，不能修正 ASR 识错的单词，也不能保证翻译模型完全准确
+- 模型标点不保证语义完整；endpoint 后达到等待预算时可能输出短语；连续无标点发言可能等待更久。最终修订会更新原字幕段并重新翻译，不会作为重复的新句追加。不能保证 ASR 或翻译模型完全准确
 - 双语记录保存在 `~/Library/Application Support/LumaCaption/Transcripts/`
+
+## 0.5 断句与修订
+
+- Bridge 保留相同文本的真实 ASR 更新，提供 utterance ID；定时器不再重放缓存文本。只有同一 utterance 中 audio 游标推进的结果参与稳定性确认。
+- 两个通用参数位于 `Segmenter.Configuration`：`confirmation = 0.45s`、`maxWait = 2.0s`。前者确认真实更新中的共同前缀，后者限制 endpoint 后等待续接的时间，并允许使用已稳定的逗号、分号或冒号边界。模型 endpoint 仍使用 SDK 的 800ms token-silence。
+- partial 中优先提交已经稳定且后面出现新词的句末边界；超过预算时可提交稳定的分句标点边界；没有标点时不会按时间或词数硬切。没有新 ASR 结果时不强行确认 partial。
+- final 中完整标点句及时提交（包括 Yes./No.）；没有句末标点的尾部暂存，等待下一 utterance。跨段保留重复词，不做文本去重猜测。句子范围由系统 NaturalLanguage tokenizer 识别。
+- ASR 修订已提交前缀时，保留未受影响的段，替换受影响的后缀并删除旧的后续段。段 ID 保持稳定，revision 递增；过期翻译结果不会显示或写入当前文本记录。
+- `transcript.jsonl` 保留事件历史（含 revision 和 segment_removed），`transcript.txt` 保留已完成翻译的当前版本。重建文本只在修订时发生。
+- 日志中的 `latency_seconds` 是提交后等待及翻译耗时；`segmentation_wait_seconds` 是应用缓冲等待；`buffer_and_translation_seconds` 是两者之和，**不是精确的最后发声到中文字幕延迟**。800ms endpoint、ASR 推理与采集延迟仍需单独考虑，1～2.5 秒是目标而非保证。
+- 当前 SDK 的 stability/confidence 不是可靠的连续置信评分，不用于决策。没有引入语法模型，错误的模型句号仍可能导致语义上不完整的句子。
+
+回归测试包含真实更新/缓存区分、修订插入删除、跨 endpoint 续接、缩写/数字/短回答、停止冲刷、历史 ID、过期译文和 transcript 修订。

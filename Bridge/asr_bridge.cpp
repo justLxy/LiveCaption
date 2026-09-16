@@ -5,8 +5,27 @@
 #include <unistd.h>
 static void check(nemo_speech_asr_status s) { if(s != NEMO_SPEECH_ASR_OK) { fprintf(stderr,"ASR: %s\n",nemo_speech_asr_last_error()); exit(2); } }
 static std::string quote(const char* s) { std::string o="\""; for(const unsigned char* p=(const unsigned char*)s;*p;++p) { if(*p=='"'||*p=='\\') {o+='\\';o+=*p;} else if(*p<32){char b[8];snprintf(b,8,"\\u%04x",*p);o+=b;}else o+=*p; }return o+'"'; }
-static std::string last_partial;
-static void drain(nemo_speech_asr_stream* s) { for(;;){ nemo_speech_asr_result* r=nullptr;check(nemo_speech_asr_stream_next(s,&r));if(!r)break; if(nemo_speech_asr_result_alternative_count(r)) { const std::string text=nemo_speech_asr_result_transcript(r,0); const bool final=nemo_speech_asr_result_is_final(r); if(!final && text==last_partial){nemo_speech_asr_result_destroy(r);continue;} last_partial=final?"":text; printf("{\"type\":\"%s\",\"text\":%s,\"audio\":%.3f}\n",nemo_speech_asr_result_is_final(r)?"final":"partial",quote(nemo_speech_asr_result_transcript(r,0)).c_str(),nemo_speech_asr_result_audio_processed(r));fflush(stdout);}nemo_speech_asr_result_destroy(r); } }
+static unsigned long long utterance = 0;
+static void drain(nemo_speech_asr_stream* stream) {
+    for (;;) {
+        nemo_speech_asr_result* result = nullptr;
+        check(nemo_speech_asr_stream_next(stream, &result));
+        if (!result) break;
+        const bool final = nemo_speech_asr_result_is_final(result);
+        const bool has_text = nemo_speech_asr_result_alternative_count(result) > 0;
+        // Do not deduplicate: next() reports actual decoder updates. Swift needs
+        // unchanged hypotheses with advancing audio to establish prefix stability.
+        if (has_text || final) {
+            const char* text = has_text ? nemo_speech_asr_result_transcript(result, 0) : "";
+            printf("{\"type\":\"%s\",\"utterance\":%llu,\"text\":%s,\"audio\":%.3f}\n",
+                   final ? "final" : "partial", utterance, quote(text).c_str(),
+                   nemo_speech_asr_result_audio_processed(result));
+            fflush(stdout);
+        }
+        if (final) ++utterance;
+        nemo_speech_asr_result_destroy(result);
+    }
+}
 int main(int argc,char**argv) {
  if(argc!=2){fprintf(stderr,"Usage: asr-bridge MODEL.gguf < mono-f32le-16000\n");return 1;}
  nemo_speech_asr_backend_config backend{sizeof(backend),0};
