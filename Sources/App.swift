@@ -29,6 +29,7 @@ struct ControlButton: View {
 struct SubtitleView: View {
     @ObservedObject var model:AppModel
     private var hovering: Bool { model.hovering }
+    private var captionColor: Color { model.textTone == "dark" ? Color(white:0.23) : Color(white:0.88) }
     var body: some View {
         VStack(alignment:.leading,spacing:14) {
             // 控制栏 - 仅悬停时显示
@@ -36,10 +37,17 @@ struct SubtitleView: View {
                 HStack(spacing:0) {
                     // 左侧：状态和音频来源
                     HStack(spacing:8) {
-                        Circle()
-                            .fill(model.running ? Color.mint : Color.gray.opacity(0.5))
-                            .frame(width:7,height:7)
-                            .help(model.status)
+                        Menu {
+                            ForEach(ASRProviderKind.allCases) { kind in
+                                Button((model.provider == kind ? "✓ " : "") + kind.title) { model.selectProvider(kind) }
+                            }
+                        } label: {
+                            Image(systemName:model.provider == .local ? "desktopcomputer" : "cloud")
+                                .foregroundStyle(model.running ? Color.mint : Color.gray)
+                        }
+                        .menuStyle(.borderlessButton).frame(width:24)
+                        .disabled(model.busy || model.switchingSource)
+                        .help("ASR: " + model.provider.title)
 
                         Picker("音频来源",selection:Binding(get:{ model.source },set:{ model.selectSource($0) })) {
                             Text("系统音频").tag("system")
@@ -52,6 +60,9 @@ struct SubtitleView: View {
                         .help("切换音频来源")
                     }
 
+                    .padding(.horizontal,6)
+                    .background(.black.opacity(0.65),in:RoundedRectangle(cornerRadius:6))
+
                     // 中间：可拖动的弹性空间
                     Rectangle()
                         .fill(.clear)
@@ -61,6 +72,9 @@ struct SubtitleView: View {
 
                     // 右侧：操作按钮
                     HStack(spacing:6) {
+                        ControlButton(icon:"circle.lefthalf.filled",help:model.textTone == "dark" ? "切换为浅色文字" : "切换为深色文字") {
+                            model.textTone = model.textTone == "dark" ? "light" : "dark"
+                        }
                         ControlButton(icon: model.running || model.busy ? "stop.fill" : "play.fill",
                                     help: "开始 / 停止",
                                     disabled: model.switchingSource) {
@@ -79,20 +93,22 @@ struct SubtitleView: View {
                             model.quitApp?()
                         }
                     }
+                    .padding(3)
+                    .background(.black.opacity(0.65),in:RoundedRectangle(cornerRadius:6))
                 }
                 .frame(height:28)
                 .foregroundStyle(.white.opacity(0.72))
                 .transition(.move(edge:.top).combined(with:.opacity))
             }
             if hovering && (model.busy || model.switchingSource || (!model.running && !model.status.hasPrefix("就绪") && !model.status.hasPrefix("已停止"))) {
-                Text(model.switchingSource ? "正在切换音频来源…" : model.status).font(.system(size:11)).foregroundStyle(.white.opacity(0.6)).fixedSize(horizontal:false,vertical:true)
+                Text(model.switchingSource ? "正在切换输入或识别服务…" : model.status).font(.system(size:11)).foregroundStyle(captionColor).fixedSize(horizontal:false,vertical:true)
                     .transition(.opacity)
             }
             if hovering && model.displayMode == "history" {
                 HStack {
-                    Text("长段记录 · \(model.history.entries.count) 段").foregroundStyle(.secondary)
+                    Text("长段记录 · \(model.history.entries.count) 段").foregroundStyle(captionColor.opacity(0.75))
                     Spacer()
-                    Button(model.followLatest ? "跟随最新 ✓" : "回到最新 ↓") { model.followLatest.toggle() }.buttonStyle(.plain).foregroundStyle(.mint)
+                    Button(model.followLatest ? "跟随最新 ✓" : "回到最新 ↓") { model.followLatest.toggle() }.buttonStyle(.plain).foregroundStyle(captionColor)
                 }.font(.system(size:11))
                     .transition(.opacity)
             }
@@ -102,16 +118,16 @@ struct SubtitleView: View {
                         if model.displayMode == "history" && !model.history.entries.isEmpty {
                             ForEach(model.history.entries) { entry in
                                 VStack(alignment:.leading,spacing:8) {
-                                    if model.showEnglish { Text(entry.english).font(.system(size:model.englishFontSize)).foregroundStyle(.white.opacity(0.72)).textSelection(.enabled) }
-                                    if model.showChinese { Text(entry.chinese ?? "翻译中…").font(.system(size:model.fontSize,weight:.medium)).foregroundStyle(.white.opacity(entry.chinese == nil ? 0.4 : 1)).lineSpacing(5).textSelection(.enabled) }
+                                    if model.showEnglish { Text(entry.english).font(.system(size:model.englishFontSize)).foregroundStyle(captionColor).textSelection(.enabled) }
+                                    if model.showChinese { Text(entry.chinese ?? "翻译中…").font(.system(size:model.fontSize,weight:.medium)).foregroundStyle(captionColor.opacity(entry.chinese == nil ? 0.75 : 1)).lineSpacing(5).textSelection(.enabled) }
                                 }.frame(maxWidth:.infinity,alignment:.leading).id(entry.id)
                             }
                         } else {
-                            if model.showEnglish && !model.english.isEmpty { Text(model.english).font(.system(size:model.englishFontSize)).foregroundStyle(.white.opacity(0.72)).textSelection(.enabled) }
-                            if model.showChinese && !model.chinese.isEmpty { Text(model.chinese).font(.system(size:model.fontSize,weight:.medium)).foregroundStyle(.white).lineSpacing(5).textSelection(.enabled) }
+                            if model.showEnglish && !model.english.isEmpty { Text(model.english).font(.system(size:model.englishFontSize)).foregroundStyle(captionColor).textSelection(.enabled) }
+                            if model.showChinese && !model.chinese.isEmpty { Text(model.chinese).font(.system(size:model.fontSize,weight:.medium)).foregroundStyle(captionColor).lineSpacing(5).textSelection(.enabled) }
                         }
                         if model.showEnglish && !model.partial.isEmpty {
-                            Text("· " + model.partial).font(.system(size:model.englishFontSize)).foregroundStyle(.white.opacity(0.52))
+                            Text("· " + model.partial).font(.system(size:model.englishFontSize)).foregroundStyle(captionColor.opacity(0.8))
                         }
                         Color.clear.frame(height:1).id("latest")
                     }.frame(maxWidth:.infinity,alignment:.leading)
@@ -127,7 +143,7 @@ struct SubtitleView: View {
                     Text(model.clickThrough ? "点击穿透 · 菜单栏可关闭" : "⌥⌘S 显示 / 隐藏")
                     Spacer()
                     Text(model.latency)
-                }.font(.system(size:10)).foregroundStyle(.white.opacity(0.36))
+                }.font(.system(size:10)).foregroundStyle(captionColor.opacity(0.75))
                     .transition(.opacity)
             }
         }
@@ -135,6 +151,7 @@ struct SubtitleView: View {
         .padding(.horizontal,24).padding(.vertical,17)
         .background(RoundedRectangle(cornerRadius:18).fill(Color(red:0.035,green:0.045,blue:0.06).opacity(model.opacity)))
         .overlay(RoundedRectangle(cornerRadius:18).strokeBorder(.white.opacity(model.opacity == 0 ? 0 : 0.10),lineWidth:1))
+        .overlay(WindowResizeBorder())
         .onHover { model.hovering = $0 }
         .preferredColorScheme(.dark)
     }
@@ -158,16 +175,24 @@ struct PreferencesView: View {
     var body: some View {
         ScrollView {
         VStack(alignment:.leading,spacing:20) {
-            HStack { VStack(alignment:.leading,spacing:5) { Text("LumaCaption").font(.system(size:25,weight:.semibold)); Text("本地英中字幕 · Apple Silicon").foregroundStyle(.secondary) }; Spacer(); Image(systemName:"captions.bubble").font(.system(size:32)).foregroundStyle(.mint) }
+            HStack { VStack(alignment:.leading,spacing:5) { Text("LumaCaption").font(.system(size:25,weight:.semibold)); Text("本地 / 云端识别 · 本地中文翻译").foregroundStyle(.secondary) }; Spacer(); Image(systemName:"captions.bubble").font(.system(size:32)).foregroundStyle(.mint) }
             Form {
                 Picker("显示模式",selection:$model.displayMode) { Text("单句字幕").tag("single"); Text("长段转录与翻译").tag("history") }
                 if model.displayMode == "history" {
                     Picker("窗口保留记录",selection:$model.historyLimit) { Text("50 段").tag(50); Text("100 段").tag(100); Text("300 段").tag(300); Text("1000 段").tag(1000) }
                     Text("上滚暂停跟随，可回看英中记录；完整 transcript 始终保存。").font(.caption).foregroundStyle(.secondary)
                 }
-                Text("识别模型：Nemotron English · 0.6B").font(.caption).foregroundStyle(.secondary)
+                Picker("ASR Provider",selection:Binding(get:{ model.provider },set:{ model.selectProvider($0) })) {
+                    ForEach(ASRProviderKind.allCases) { kind in Text(kind.title).tag(kind) }
+                }.disabled(model.busy || model.switchingSource)
+                Text(model.provider == .local ? "音频与中文翻译均在本机处理。" : "音频实时发送至 AssemblyAI；中文仍由本机 Hy-MT2 翻译。")
+                    .font(.caption).foregroundStyle(.secondary)
                 Picker("音频来源",selection:Binding(get:{ model.source },set:{ model.selectSource($0) })) { Text("麦克风").tag("microphone"); Text("Mac 系统音频").tag("system") }.disabled(model.busy || model.switchingSource)
                 HStack { Text("背景不透明度"); Slider(value:$model.opacity,in:0...1); Text("\(Int(model.opacity*100))%").monospacedDigit().frame(width:40) }
+                Picker("文字颜色",selection:$model.textTone) {
+                    Text("深色 · 适合浅色背景").tag("dark")
+                    Text("浅色 · 适合深色背景").tag("light")
+                }
                 FontSizeControl(title:"中文字号",size:$model.fontSize)
                 FontSizeControl(title:"英文字号",size:$model.englishFontSize)
                 Toggle("显示英文（包含即时 partial）",isOn:$model.showEnglish)
@@ -205,7 +230,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification:Notification) {
         NSApp.setActivationPolicy(.accessory)
         panel = SubtitlePanel(contentRect:NSRect(x:160,y:120,width:800,height:238),styleMask:[.borderless,.resizable,.nonactivatingPanel],backing:.buffered,defer:false)
-        panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = true
+        panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = false
         panel.acceptsMouseMovedEvents = true; panel.isMovableByWindowBackground = false; panel.hidesOnDeactivate = false; panel.isFloatingPanel = true
         panel.level = .floating; panel.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary]
         panel.minSize = NSSize(width:360,height:165); panel.delegate = self

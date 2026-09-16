@@ -4,7 +4,7 @@ import Darwin
 struct ASREvent: Decodable { let type: String; let text: String?; let audio: Double?; let utterance: Int? }
 
 /// Serial pipe writer with a 2 s hard backlog bound. Overload stops visibly rather than dropping words silently.
-final class ASRProcess: @unchecked Sendable {
+final class ASRProcess: ASRProvider, @unchecked Sendable {
     let process = Process()
     private let input = Pipe(), output = Pipe()
     private let writer = DispatchQueue(label: "caption.pcm-writer", qos: .userInitiated)

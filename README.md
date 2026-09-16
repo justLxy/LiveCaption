@@ -1,14 +1,14 @@
 # LumaCaption
 
-实时英文语音字幕与中文翻译工具，完全本地运行，无需联网。
+实时英文语音字幕与中文翻译工具。默认使用本地 Nemotron，也可选 AssemblyAI 云端实时识别；中文翻译始终使用本地 Hy-MT2。
 
 ## 核心功能
 
 捕获英文语音（麦克风或 Mac 系统音频）→ 实时识别为英文字幕 → 智能断句 → 翻译为中文字幕
 
-- 本地推理：所有模型在 Mac 本机运行（Metal 加速），不发送数据到云端
+- 识别 Provider：Nemotron 本地 Metal 推理，或 AssemblyAI 云端实时识别；仅选择 Cloud 时上传音频
 - 实时字幕：边听边显示，悬浮窗支持置顶、穿透、透明度调节
-- 智能断句：基于语法规则的断句引擎，避免在不完整从句、悬空介词或条件句中间断开
+- 稳定断句：结合真实更新中的稳定前缀、模型标点和 endpoint，避免按时间硬切
 - 双语记录：自动保存完整的英中双语记录（JSONL + TXT）
 
 ## 使用的模型
@@ -16,9 +16,10 @@
 | 组件 | 模型 | 量化 | 作用 |
 |------|------|------|------|
 | **ASR（语音识别）** | NVIDIA Nemotron English 0.6B | Q8_0 GGUF | 实时英文语音转文字，使用 NeMo-Speech.cpp cache-aware streaming API |
+| **ASR（可选云端）** | AssemblyAI Universal-3.5 Pro | — | v3 WebSocket，`speech_model=universal-3-5-pro` |
 | **翻译** | 腾讯 Hy-MT2-1.8B | Q4_K_M GGUF | 英译中，通过 llama.cpp 加载 |
 
-模型文件已内置在 App 中，无需单独下载。
+本地模型文件已内置在 App 中，无需单独下载。云端识别需要网络和有效的 AssemblyAI 账户。
 
 ## 系统要求
 
@@ -29,7 +30,7 @@
 ## 使用方法
 
 1. 双击 `LumaCaption.app` 启动
-2. 点击菜单栏图标 → 设置，选择音频源（麦克风或系统音频）
+2. 点击菜单栏图标 → 设置，选择 ASR Provider 与音频源（麦克风或系统音频）
 3. 点击"开始字幕"
 4. 使用快捷键 ⌥⌘S 显示/隐藏字幕窗口
 
@@ -46,7 +47,7 @@
 
 - **断句策略**：ASR 的 final 事件是音频分段边界，不等同于完整句子。使用真实 ASR 更新中的稳定前缀、模型标点和 endpoint 组合判断；无句末标点的 final 可跨段续接，并由统一等待预算兜底。不使用课程关键词或句型特例
 - **流式处理**：ASR 使用真正的 cache-aware streaming API，持续接收 20ms PCM 帧；翻译仅处理稳定片段
-- **Metal 加速**：ASR 和翻译模型均使用 Metal GPU 加速
+- **Metal 加速**：本地 ASR 和翻译模型使用 Metal GPU 加速
 
 ## 构建
 
@@ -91,3 +92,44 @@ Tests/run-tests.sh
 - 当前 SDK 的 stability/confidence 不是可靠的连续置信评分，不用于决策。没有引入语法模型，错误的模型句号仍可能导致语义上不完整的句子。
 
 回归测试包含真实更新/缓存区分、修订插入删除、跨 endpoint 续接、缩写/数字/短回答、停止冲刷、历史 ID、过期译文和 transcript 修订。
+
+## 0.5.1 透明窗口
+
+背景 0% 时保留 7pt 的近乎透明边缘缩放区域，四边与角落均可拖动。字幕采用浅色字及深色描边，以兼容白色页面。鼠标悬停时临时显示深色底板和控制栏，移开后恢复设定透明度。开启点击穿透时，窗口不会接收拖动；需先在菜单栏关闭点击穿透。
+
+## 0.5.2 文字配色
+
+移除字幕描边、文字阴影和窗口阴影。顶部半黑半白圆形按钮可切换深灰／浅灰文字，设置中的“文字颜色”也可选择，偏好自动保存。悬停不再改变整窗背景透明度，仅音频来源和按钮组显示局部底板。背景 0% 时仍保留边缘缩放区域。
+
+## 0.6.0 可选云端 ASR
+
+顶部电脑／云图标菜单，或设置中的 **ASR Provider**，可选择：
+
+- Nemotron 3 English — Local（默认）
+- AssemblyAI Universal-3.5 Pro — Cloud
+
+切换时先停止采集，等待旧 ASR 尾段及翻译保存，再开启新 Provider；悬浮窗历史保留。网络错误不会自动切换服务或重复发送旧音频。
+
+两个实现遵循 `ASRProvider` 接口，统一接收 16kHz mono Float32 PCM，输出相同 `ASREvent`。AssemblyAI 实现将连续 PCM 转为 PCM16，以 50ms 二进制帧通过 WebSocket 发送；没有 WAV 文件切片、录音上传或 batch 接口。发送积压上限 2 秒；网络或认证失败会显示错误并停止捕获。
+
+### 官方协议核对（2026-09-16）
+
+- 模型：`universal-3-5-pro`
+- 地址：`wss://streaming.assemblyai.com/v3/ws`
+- 认证：`Authorization` 请求头直接放 API key，不加 Bearer，不放 URL。
+- `Begin.configuration.model` 必须确认请求的模型，随后才开始捕获。
+- `Turn.transcript` 是当前 turn 的完整假设；`turn_order` 映射为 utterance ID；final 使用 `end_of_turn && turn_is_formatted`。
+- word end 时间戳用于识别进度；Heartbeat 不作为文本稳定证据。同一时间戳上的文本修订会更新预览，但不会被当成进度确认。
+- 使用 `mode=balanced`、`include_partial_turns=true`、`continuous_partials=true`；partials 的具体发送时机仍由服务端控制，不保证每个词都返回一条结果。
+- 停止时发送 `Terminate`，继续读取尾部 Turn，直到 `Termination`，之后才关闭连接。服务器会话最长约 3 小时；服务器结束或网络中断后需手动重新开始。
+- 翻译只调用本机 llama.cpp/Hy-MT2；glossary 仍用于本地翻译，不发送给 AssemblyAI。
+
+API key 按要求硬编码在本地 `Sources/LocalSecrets.swift`，该文件已排除 Git 跟踪；日志不包含 key、认证头或原始错误响应。重新构建时需保留此文件。
+
+官方来源：
+- https://www.assemblyai.com/docs/streaming/select-the-speech-model
+- https://www.assemblyai.com/docs/streaming/api-spec/streaming-websocket
+- https://www.assemblyai.com/docs/streaming/message-sequence
+- https://www.assemblyai.com/docs/streaming/common-session-errors-and-closures
+
+测试模式可运行 `LUMACAPTION_TEST_PROVIDER=assemblyAI ./LumaCaption.app/Contents/MacOS/LumaCaption --headless --sample-seconds 12`，仅发送 App 内置样例，不录麦克风，不改变保存的 Provider 偏好；将环境变量改成 `local` 可验证本地路径。

@@ -55,7 +55,9 @@ struct Segmenter {
             if !active.isEmpty { changes += finish(now: now) }
             currentUtterance = utterance
             lastAudio = -.infinity
-        } else if !final && audio <= lastAudio { return [] }
+        }
+        let advanced = audio > lastAudio
+        if !final && !advanced && canonical(text) == active { return changes }
         if active.isEmpty && committed.isEmpty && !text.isEmpty {
             lead = carry; leadSince = carrySince; carry = ""
             pendingSince = carrySince ?? now; carrySince = nil
@@ -74,6 +76,9 @@ struct Segmenter {
             lastAudio = -.infinity
             return changes
         }
+        // A revised cloud partial can retain the same word-end timestamp. Display
+        // it immediately, but do not treat it as new progress for early submission.
+        guard advanced else { return changes }
         let used = committed.flatMap { words($0.english) }
         guard full.starts(with: used) else { return changes } // Reconcile authoritatively at final.
         let remaining = Array(full.dropFirst(used.count))

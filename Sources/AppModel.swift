@@ -9,15 +9,17 @@ final class AppModel: ObservableObject {
     @Published var followLatest = true
     @Published var history = CaptionHistory()
     @Published var hovering = false
-    @Published var status = "就绪 · 全部在本机运行"
+    @Published var status = "就绪"
     @Published var running = false
     @Published var busy = false
     @Published var partial = ""
     @Published var english = ""
     @Published var chinese = "点击开始，听见英文，看见中文。"
     @Published var latency = ""
+    @Published var provider = ASRProviderKind.initialSelection { didSet { save("asrProvider",provider.rawValue) } }
     @Published var source = UserDefaults.standard.string(forKey:"source") ?? "microphone" { didSet { save("source",source) } }
     @Published var opacity = UserDefaults.standard.object(forKey:"opacity") as? Double ?? 0.78 { didSet { save("opacity",opacity) } }
+    @Published var textTone = UserDefaults.standard.string(forKey:"textTone") ?? ((UserDefaults.standard.object(forKey:"opacity") as? Double ?? 0.78) == 0 ? "dark" : "light") { didSet { save("textTone",textTone) } }
     @Published var englishFontSize = UserDefaults.standard.object(forKey:"englishFontSize") as? Double ?? max(8, (UserDefaults.standard.object(forKey:"fontSize") as? Double ?? 28) * 0.68) { didSet { save("englishFontSize",englishFontSize) } }
     @Published var switchingSource = false
     @Published var fontSize = UserDefaults.standard.object(forKey:"fontSize") as? Double ?? 28 { didSet { save("fontSize",fontSize) } }
@@ -34,7 +36,7 @@ final class AppModel: ObservableObject {
     let transcripts: URL
     private let resources = Bundle.main.resourceURL!
     private var capture: AudioCapture?
-    private var asr: ASRProcess?
+    private var asr: (any ASRProvider)?
     private let translator = Translator()
     private var journal: TranscriptJournal?
     private var segmenter = Segmenter()
@@ -70,6 +72,17 @@ final class AppModel: ObservableObject {
             start(preserveHistory:true)
         }
     }
+    func selectProvider(_ next: ASRProviderKind) {
+        guard next != provider, !busy, !switchingSource, !stopping else { return }
+        guard running else { provider = next; return }
+        switchingSource = true
+        Task {
+            await stop()
+            provider = next
+            switchingSource = false
+            start(preserveHistory:true)
+        }
+    }
     func start(sampleSeconds: Double? = nil, preserveHistory:Bool = false) {
         guard !busy, !running else { return }
         busy = true; stopping = false; generation = UUID(); let sessionID = generation
@@ -79,25 +92,31 @@ final class AppModel: ObservableObject {
         startupTask = Task { [self] in
             do {
                 journal = try TranscriptJournal(root:transcripts)
-                try journal?.record(["type":"session_start","source":sampleSeconds == nil ? source : "test_fixture","sample_seconds":sampleSeconds ?? 0])
+                try journal?.record(["type":"session_start","source":sampleSeconds == nil ? source : "test_fixture","sample_seconds":sampleSeconds ?? 0,"asr_provider":provider.rawValue])
                 status = "正在加载 Hy-MT2 · Metal"
                 try await translator.start(resources:resources,log:journal!.directory.appendingPathComponent("llama.log"))
                 try Task.checkCancellation()
                 guard generation == sessionID else { return }
-                status = "正在加载 Nemotron English · Metal"
-                let bridge = try ASRProcess(resources:resources,log:journal!.directory.appendingPathComponent("asr.log"))
+                status = provider == .local ? "正在加载 Nemotron English · Metal" : "正在连接 AssemblyAI · 云端 ASR"
+                let bridge: any ASRProvider
+                switch provider {
+                case .local: bridge = try ASRProcess(resources:resources,log:journal!.directory.appendingPathComponent("asr.log"))
+                case .assemblyAI: bridge = AssemblyAIProvider()
+                }
                 bridge.event = { [weak self] event in DispatchQueue.main.async {
                     guard let self, self.generation == sessionID else { return }
                     self.receive(event)
                 } }
-                bridge.failure = { [weak self] message in Task { @MainActor in
-                    guard let self, self.generation == sessionID, !self.stopping else { return }; self.fail(message)
+                bridge.failure = { [weak self] message in DispatchQueue.main.async {
+                    guard let self, self.generation == sessionID else { return }
+                    if self.stopping { self.record(["type":"asr_drain_error","message":message]) }
+                    else { self.fail(message) }
                 } }
                 asr = bridge; try bridge.start()
                 for _ in 0..<180 {
                     if running { break }; try await Task.sleep(nanoseconds:500_000_000); try Task.checkCancellation()
                 }
-                guard running else { throw NSError(domain:"ASR 模型加载超时",code:1) }
+                guard running else { throw NSError(domain:"ASR 启动超时",code:1) }
                 captureStarted = Date()
                 if let duration = sampleSeconds { try startSample(seconds:duration) }
                 else {
@@ -202,7 +221,7 @@ final class AppModel: ObservableObject {
         await capture?.stop(); capture = nil
         asr?.finish()
         // Let EOF flush the true streaming recognizer and drain its final translation.
-        for _ in 0..<100 { if asr == nil || (asr?.process.isRunning != true && asrDrained) { break }; try? await Task.sleep(nanoseconds:100_000_000) }
+        for _ in 0..<100 { if asr == nil || asrDrained { break }; try? await Task.sleep(nanoseconds:100_000_000) }
         acceptASREvents = false
         asr?.terminate(); asr = nil
         apply(segmenter.tick(force:true))

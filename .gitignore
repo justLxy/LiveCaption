@@ -75,3 +75,6 @@ Dependencies/
 
 # Claude Code
 .claude/scheduled_tasks.json
+
+# User-supplied credentials for this local app build
+Sources/LocalSecrets.swift
