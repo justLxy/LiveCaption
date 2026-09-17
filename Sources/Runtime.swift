@@ -3,6 +3,37 @@ import Darwin
 
 struct ASREvent: Decodable { let type: String; let text: String?; let audio: Double?; let utterance: Int? }
 
+/// Compiles glossary patterns only when the user changes the glossary, rather
+/// than recompiling every rule for every translated segment.
+struct GlossaryMatcher {
+    private struct Rule {
+        let source: String
+        let target: String
+        let expression: NSRegularExpression
+    }
+    let source: String
+    private let rules: [Rule]
+
+    init(_ source: String) {
+        self.source = source
+        rules = source.split(separator:"\n").compactMap { line in
+            let parts = line.split(separator:"=",maxSplits:1).map { $0.trimmingCharacters(in:.whitespaces) }
+            guard parts.count == 2, !parts[0].isEmpty else { return nil }
+            let escaped = NSRegularExpression.escapedPattern(for:parts[0])
+            let pattern = "(?i)(?<![\\p{L}\\p{N}])\(escaped)(?![\\p{L}\\p{N}])"
+            guard let expression = try? NSRegularExpression(pattern:pattern) else { return nil }
+            return Rule(source:parts[0],target:parts[1],expression:expression)
+        }
+    }
+
+    func instructions(for english: String, limit: Int = 24) -> String {
+        let range = NSRange(english.startIndex..<english.endIndex,in:english)
+        return rules.lazy.compactMap { rule in
+            rule.expression.firstMatch(in:english,range:range) == nil ? nil : "\(rule.source) 翻译成 \(rule.target)"
+        }.prefix(limit).joined(separator:"\n")
+    }
+}
+
 /// Serial pipe writer with a 2 s hard backlog bound. Overload stops visibly rather than dropping words silently.
 final class ASRProcess: ASRProvider, @unchecked Sendable {
     let process = Process()
@@ -31,16 +62,17 @@ final class ASRProcess: ASRProvider, @unchecked Sendable {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var buffer = Data()
+            var chunk = [UInt8](repeating:0,count:8192)
+            let decoder = JSONDecoder()
             do {
                 while true {
-                    var chunk = [UInt8](repeating: 0, count: 8192)
                     let count = Darwin.read(self.output.fileHandleForReading.fileDescriptor, &chunk, chunk.count)
                     if count == 0 { break }
                     if count < 0 { if errno == EINTR { continue }; throw NSError(domain:NSPOSIXErrorDomain, code:Int(errno)) }
                     buffer.append(contentsOf: chunk.prefix(count))
                     while let end = buffer.firstIndex(of: 10) {
                         let line = Data(buffer[..<end]); buffer.removeSubrange(...end)
-                        if let e = try? JSONDecoder().decode(ASREvent.self, from: line) { self.event?(e) }
+                        if let e = try? decoder.decode(ASREvent.self,from:line) { self.event?(e) }
                     }
                     if buffer.count > 1_000_000 { self.failure?("ASR 输出协议异常"); break }
                 }
@@ -72,6 +104,7 @@ final class Translator {
     private var process: Process?
     private let token = UUID().uuidString
     private var port = 0
+    private var glossaryMatcher = GlossaryMatcher("")
     private var session: URLSession = {
         let c = URLSessionConfiguration.ephemeral; c.timeoutIntervalForRequest = 12; c.timeoutIntervalForResource = 15
         return URLSession(configuration: c)
@@ -107,11 +140,8 @@ final class Translator {
         stop(); throw NSError(domain:"翻译模型加载超时",code:4)
     }
     func translate(_ english: String, glossary: String) async throws -> String {
-        let matches = glossary.split(separator:"\n").compactMap { line -> String? in
-            let parts = line.split(separator:"=", maxSplits:1).map { $0.trimmingCharacters(in:.whitespaces) }
-            guard parts.count == 2, !parts[0].isEmpty, english.localizedCaseInsensitiveContains(parts[0]) else { return nil }
-            return "\(parts[0]) 翻译成 \(parts[1])"
-        }.prefix(24).joined(separator:"\n")
+        if glossaryMatcher.source != glossary { glossaryMatcher = GlossaryMatcher(glossary) }
+        let matches = glossaryMatcher.instructions(for:english)
         let prompt = (matches.isEmpty ? "" : "参考下面的翻译：\n\(matches)\n") + "将以下文本翻译为简体中文，注意只需要输出翻译后的结果，不要额外解释：\n\n" + english
         var request = URLRequest(url:URL(string:"http://127.0.0.1:\(port)/v1/chat/completions")!)
         request.httpMethod = "POST"; request.setValue("application/json",forHTTPHeaderField:"Content-Type"); request.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization")

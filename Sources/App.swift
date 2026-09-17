@@ -7,6 +7,50 @@ final class SubtitlePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+struct RunningIndicator: View {
+    let running: Bool
+    var body: some View {
+        Circle()
+            .fill(running ? Color.green : Color.red)
+            .frame(width:8,height:8)
+            .shadow(color:(running ? Color.green : Color.red).opacity(0.55),radius:3)
+            .animation(.easeInOut(duration:0.2),value:running)
+            .accessibilityLabel(running ? "字幕正在运行" : "字幕已停止")
+            .help(running ? "字幕正在运行" : "字幕已停止")
+    }
+}
+
+private struct CaptionCursorRegion: NSViewRepresentable {
+    final class Region: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { window.invalidateCursorRects(for:self) }
+        }
+        override func setFrameSize(_ newSize: NSSize) {
+            let changed = frame.size != newSize
+            super.setFrameSize(newSize)
+            if changed, let window { window.invalidateCursorRects(for:self) }
+        }
+        override func resetCursorRects() { addCursorRect(bounds,cursor:.iBeam) }
+    }
+    func makeNSView(context: Context) -> Region {
+        let region = Region()
+        region.setAccessibilityElement(false)
+        return region
+    }
+    func updateNSView(_ region: Region, context: Context) {}
+}
+
+private extension View {
+    /// Use a real AppKit cursor rect. SwiftUI's hover callback can be skipped by
+    /// transparent panels and by sibling NSViewRepresentable overlays.
+    func captionTextSelection() -> some View {
+        textSelection(.enabled)
+            .overlay(CaptionCursorRegion())
+    }
+}
+
 // 统一的控制按钮样式
 struct ControlButton: View {
     let icon: String
@@ -37,13 +81,14 @@ struct SubtitleView: View {
                 HStack(spacing:0) {
                     // 左侧：状态和音频来源
                     HStack(spacing:8) {
+                        RunningIndicator(running:model.running)
                         Menu {
                             ForEach(ASRProviderKind.allCases) { kind in
                                 Button((model.provider == kind ? "✓ " : "") + kind.title) { model.selectProvider(kind) }
                             }
                         } label: {
                             Image(systemName:model.provider == .local ? "desktopcomputer" : "cloud")
-                                .foregroundStyle(model.running ? Color.mint : Color.gray)
+                                .foregroundStyle(.white.opacity(0.72))
                         }
                         .menuStyle(.borderlessButton).frame(width:24)
                         .disabled(model.busy || model.switchingSource)
@@ -59,9 +104,6 @@ struct SubtitleView: View {
                         .disabled(model.busy || model.switchingSource)
                         .help("切换音频来源")
                     }
-
-                    .padding(.horizontal,6)
-                    .background(.black.opacity(0.65),in:RoundedRectangle(cornerRadius:6))
 
                     // 中间：可拖动的弹性空间
                     Rectangle()
@@ -118,22 +160,22 @@ struct SubtitleView: View {
                         if model.displayMode == "history" && !model.history.entries.isEmpty {
                             ForEach(model.history.entries) { entry in
                                 VStack(alignment:.leading,spacing:8) {
-                                    if model.showEnglish { Text(entry.english).font(.system(size:model.englishFontSize)).foregroundStyle(captionColor).textSelection(.enabled) }
-                                    if model.showChinese { Text(entry.chinese ?? "翻译中…").font(.system(size:model.fontSize,weight:.medium)).foregroundStyle(captionColor.opacity(entry.chinese == nil ? 0.75 : 1)).lineSpacing(5).textSelection(.enabled) }
+                                    if model.showEnglish { Text(entry.english).font(.system(size:model.englishFontSize)).foregroundStyle(captionColor).captionTextSelection() }
+                                    if model.showChinese { Text(entry.chinese ?? "翻译中…").font(.system(size:model.fontSize,weight:.medium)).foregroundStyle(captionColor.opacity(entry.chinese == nil ? 0.75 : 1)).lineSpacing(5).captionTextSelection() }
                                 }.frame(maxWidth:.infinity,alignment:.leading).id(entry.id)
                             }
                         } else {
-                            if model.showEnglish && !model.english.isEmpty { Text(model.english).font(.system(size:model.englishFontSize)).foregroundStyle(captionColor).textSelection(.enabled) }
-                            if model.showChinese && !model.chinese.isEmpty { Text(model.chinese).font(.system(size:model.fontSize,weight:.medium)).foregroundStyle(captionColor).lineSpacing(5).textSelection(.enabled) }
+                            if model.showEnglish && !model.english.isEmpty { Text(model.english).font(.system(size:model.englishFontSize)).foregroundStyle(captionColor).captionTextSelection() }
+                            if model.showChinese && !model.chinese.isEmpty { Text(model.chinese).font(.system(size:model.fontSize,weight:.medium)).foregroundStyle(captionColor).lineSpacing(5).captionTextSelection() }
                         }
                         if model.showEnglish && !model.partial.isEmpty {
-                            Text("· " + model.partial).font(.system(size:model.englishFontSize)).foregroundStyle(captionColor.opacity(0.8))
+                            Text("· " + model.partial).font(.system(size:model.englishFontSize)).foregroundStyle(captionColor.opacity(0.8)).captionTextSelection()
                         }
                         Color.clear.frame(height:1).id("latest")
                     }.frame(maxWidth:.infinity,alignment:.leading)
                 }
                 .background(ReadingScrollMonitor { if model.displayMode == "history" { model.followLatest = false } })
-                .onChange(of:model.history.entries) { _, _ in if model.followLatest { proxy.scrollTo("latest",anchor:.bottom) } }
+                .onChange(of:model.history.entries.last) { _, _ in if model.followLatest { proxy.scrollTo("latest",anchor:.bottom) } }
                 .onChange(of:model.partial) { _, _ in if model.followLatest { proxy.scrollTo("latest",anchor:.bottom) } }
                 .onChange(of:model.followLatest) { _, follow in if follow { proxy.scrollTo("latest",anchor:.bottom) } }
                 .onChange(of:model.displayMode) { _, _ in if model.followLatest { proxy.scrollTo("latest",anchor:.bottom) } }
@@ -172,8 +214,6 @@ struct FontSizeControl: View {
 
 struct PreferencesView: View {
     @ObservedObject var model:AppModel
-    @State private var assemblyAIKey = ""
-    @State private var keyMessage = ""
     var body: some View {
         ScrollView {
         VStack(alignment:.leading,spacing:20) {
@@ -203,25 +243,23 @@ struct PreferencesView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 VStack(alignment:.leading,spacing:7) {
                     HStack {
-                        SecureField(model.hasAssemblyAIKey ? "已保存；输入新 Key 可替换" : "粘贴 AssemblyAI API Key",text:$assemblyAIKey)
+                        SecureField(model.hasAssemblyAIKey ? "已保存；输入新 Key 可替换" : "粘贴 AssemblyAI API Key",text:$model.assemblyAIKeyDraft)
                             .textFieldStyle(.roundedBorder)
                         Button("保存 Key") {
                             do {
-                                try model.saveAssemblyAIKey(assemblyAIKey)
-                                assemblyAIKey = ""; keyMessage = "已安全保存到 macOS 钥匙串"
-                            } catch { keyMessage = error.localizedDescription }
-                        }.disabled(assemblyAIKey.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
+                                try model.saveAssemblyAIKey(model.assemblyAIKeyDraft)
+                            } catch { model.assemblyAIKeyMessage = error.localizedDescription }
+                        }.disabled(model.assemblyAIKeyDraft.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
                         if model.hasAssemblyAIKey {
                             Button("删除",role:.destructive) {
                                 do {
                                     try model.deleteAssemblyAIKey()
-                                    assemblyAIKey = ""; keyMessage = "已从钥匙串删除"
-                                } catch { keyMessage = error.localizedDescription }
+                                } catch { model.assemblyAIKeyMessage = error.localizedDescription }
                             }
                         }
                     }
-                    Text(keyMessage.isEmpty ? (model.hasAssemblyAIKey ? "Cloud Key 已保存，不会写入偏好设置或日志。" : "只有选择 Cloud 时才会使用；默认 Local 不需要 Key。") : keyMessage)
-                        .font(.caption).foregroundStyle(keyMessage.hasPrefix("无法") ? .red : .secondary)
+                    Text(model.assemblyAIKeyMessage.isEmpty ? (model.hasAssemblyAIKey ? "Cloud Key 已保存在仅当前账户可读的本机文件中，不会写入偏好设置或日志。" : "只有选择 Cloud 时才会使用；默认 Local 不需要 Key。") : model.assemblyAIKeyMessage)
+                        .font(.caption).foregroundStyle(model.assemblyAIKeyMessage.hasPrefix("无法") ? Color.red : Color.secondary)
                 }
                 Picker("音频来源",selection:Binding(get:{ model.source },set:{ model.selectSource($0) })) { Text("麦克风").tag("microphone"); Text("Mac 系统音频").tag("system") }.disabled(model.busy || model.switchingSource)
                 HStack { Text("背景不透明度"); Slider(value:$model.opacity,in:0...1); Text("\(Int(model.opacity*100))%").monospacedDigit().frame(width:40) }
@@ -267,7 +305,9 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         migrateLegacyPreferences()
         let model = self.model
         NSApp.setActivationPolicy(.accessory)
-        panel = SubtitlePanel(contentRect:NSRect(x:160,y:120,width:800,height:238),styleMask:[.borderless,.resizable,.nonactivatingPanel],backing:.buffered,defer:false)
+        // A normal key-capable borderless panel lets selected SwiftUI text receive
+        // standard keyboard commands such as Command-C.
+        panel = SubtitlePanel(contentRect:NSRect(x:160,y:120,width:800,height:238),styleMask:[.borderless,.resizable],backing:.buffered,defer:false)
         panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = false
         panel.acceptsMouseMovedEvents = true; panel.isMovableByWindowBackground = false; panel.hidesOnDeactivate = false; panel.isFloatingPanel = true
         panel.level = .floating; panel.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary]
@@ -297,6 +337,13 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         let submenu = NSMenu(); root.submenu = submenu
         add(submenu,"设置…",#selector(openSettings),key:",")
         add(submenu,"退出雪笺",#selector(quit),key:"q")
+        let editRoot = NSMenuItem(title:"编辑",action:nil,keyEquivalent:"")
+        let editMenu = NSMenu(title:"编辑")
+        let copy = NSMenuItem(title:"复制",action:#selector(NSText.copy(_:)),keyEquivalent:"c")
+        copy.target = nil; editMenu.addItem(copy)
+        let selectAll = NSMenuItem(title:"全选",action:#selector(NSText.selectAll(_:)),keyEquivalent:"a")
+        selectAll.target = nil; editMenu.addItem(selectAll)
+        editRoot.submenu = editMenu; appMenu.addItem(editRoot)
         NSApp.mainMenu = appMenu
         var spec = EventTypeSpec(eventClass:OSType(kEventClassKeyboard),eventKind:UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _,_,userData in

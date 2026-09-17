@@ -14,10 +14,12 @@ final class AppModel: ObservableObject {
     @Published var busy = false
     @Published var partial = ""
     @Published var english = ""
-    @Published var chinese = "点击开始，听见英文，看见中文。"
+    @Published var chinese = "Turn speech into text, quietly."
     @Published var latency = ""
     @Published var provider = ASRProviderKind.initialSelection { didSet { save("asrProvider",provider.rawValue) } }
-    @Published private(set) var hasAssemblyAIKey = KeychainCredentialStore.hasAssemblyAIKey
+    @Published private(set) var hasAssemblyAIKey = CredentialStore.hasAssemblyAIKey
+    @Published var assemblyAIKeyDraft = ""
+    @Published var assemblyAIKeyMessage = ""
     @Published var source = UserDefaults.standard.string(forKey:"source") ?? "microphone" { didSet { save("source",source) } }
     @Published var opacity = UserDefaults.standard.object(forKey:"opacity") as? Double ?? 0.78 { didSet { save("opacity",opacity) } }
     @Published var textTone = UserDefaults.standard.string(forKey:"textTone") ?? ((UserDefaults.standard.object(forKey:"opacity") as? Double ?? 0.78) == 0 ? "dark" : "light") { didSet { save("textTone",textTone) } }
@@ -28,7 +30,7 @@ final class AppModel: ObservableObject {
     @Published var showChinese = UserDefaults.standard.object(forKey:"showChinese") as? Bool ?? true { didSet { save("showChinese",showChinese) } }
     @Published var clickThrough = false { didSet { windowChange?() } }
     @Published var onTop = true { didSet { windowChange?() } }
-    @Published var glossary = UserDefaults.standard.string(forKey:"glossary") ?? "derivative = 导数\ngradient = 梯度\nlinear algebra = 线性代数\nmachine learning = 机器学习" { didSet { save("glossary",glossary) } }
+    @Published var glossary = UserDefaults.standard.string(forKey:"glossary") ?? DefaultGlossary.text { didSet { save("glossary",glossary) } }
     var windowChange: (() -> Void)?
     var showSettings: (() -> Void)?
     var hideWindow: (() -> Void)?
@@ -46,6 +48,8 @@ final class AppModel: ObservableObject {
     private var versions: [UUID: Int] = [:]
     private var pending: [CaptionSegment] = []
     private var translationTask: Task<Void,Never>?
+    private var activeTranslation: CaptionSegment?
+    private var translationWorkerID: UUID?
     private var startupTask: Task<Void,Never>?
     private var timer: Timer?
     private var sampleTimer: Timer?
@@ -66,6 +70,12 @@ final class AppModel: ObservableObject {
         support = newSupport
         transcripts = support.appendingPathComponent("Transcripts")
         try? FileManager.default.createDirectory(at:transcripts,withIntermediateDirectories:true)
+        let defaults = UserDefaults.standard
+        if defaults.integer(forKey:"courseGlossaryVersion") < DefaultGlossary.version {
+            glossary = DefaultGlossary.merging(into:glossary)
+            defaults.set(glossary,forKey:"glossary")
+            defaults.set(DefaultGlossary.version,forKey:"courseGlossaryVersion")
+        }
     }
     private func save(_ key:String,_ value:Any) { UserDefaults.standard.set(value,forKey:key) }
     func toggle() { guard !switchingSource else { return }; if running || busy { Task { await stop() } } else { start() } }
@@ -99,7 +109,7 @@ final class AppModel: ObservableObject {
         guard !busy, !running else { return }
         let assemblyAIKey: String?
         if provider == .assemblyAI {
-            assemblyAIKey = KeychainCredentialStore.assemblyAIKey()
+            assemblyAIKey = CredentialStore.assemblyAIKey()
             guard assemblyAIKey != nil else {
                 hasAssemblyAIKey = false
                 status = "请先在设置中保存你的 AssemblyAI API Key"
@@ -109,7 +119,8 @@ final class AppModel: ObservableObject {
         busy = true; stopping = false; generation = UUID(); let sessionID = generation
         firstPartial = true; lastAudio = 0; captureStarted = nil
         if !preserveHistory { history = CaptionHistory(); followLatest = true; english = ""; chinese = "" }
-        partial = ""; latency = ""; pending = []; segmenter = Segmenter(); acceptASREvents = true; asrDrained = false; versions = [:]
+        partial = ""; latency = ""; pending = []; activeTranslation = nil; translationWorkerID = nil
+        segmenter = Segmenter(); acceptASREvents = true; asrDrained = false; versions = [:]
         startupTask = Task { [self] in
             do {
                 journal = try TranscriptJournal(root:transcripts)
@@ -155,19 +166,27 @@ final class AppModel: ObservableObject {
                 try Task.checkCancellation()
                 busy = false; status = sampleSeconds == nil ? "正在聆听 · \(source == "system" ? "系统音频" : "麦克风")" : "真实模型测试 · 示例音频"
                 keepAwake = ProcessInfo.processInfo.beginActivity(options:[.userInitiated,.idleSystemSleepDisabled],reason:"实时本地字幕")
-                timer = Timer.scheduledTimer(withTimeInterval:0.15,repeats:true) { [weak self] _ in Task { @MainActor in self?.checkStable() } }
+                let stabilityTimer = Timer(timeInterval:0.15,repeats:true) { [weak self] _ in
+                    Task { @MainActor in self?.checkStable() }
+                }
+                timer = stabilityTimer
+                RunLoop.main.add(stabilityTimer,forMode:.common)
             } catch is CancellationError { await capture?.stop(); capture = nil; asr?.terminate(); translator.stop() }
             catch { if generation == sessionID { fail(error.localizedDescription) } }
         }
     }
     func saveAssemblyAIKey(_ key:String) throws {
-        try KeychainCredentialStore.saveAssemblyAIKey(key)
+        try CredentialStore.saveAssemblyAIKey(key)
         hasAssemblyAIKey = true
-        status = "AssemblyAI API Key 已保存到 macOS 钥匙串"
+        assemblyAIKeyDraft = ""
+        assemblyAIKeyMessage = "已保存到本机，不会弹出钥匙串窗口"
+        status = "AssemblyAI API Key 已保存到本机"
     }
     func deleteAssemblyAIKey() throws {
-        try KeychainCredentialStore.deleteAssemblyAIKey()
+        try CredentialStore.deleteAssemblyAIKey()
         hasAssemblyAIKey = false
+        assemblyAIKeyDraft = ""
+        assemblyAIKeyMessage = "已从本机删除"
         if provider == .assemblyAI { status = "AssemblyAI API Key 已删除；本地模式仍可直接使用" }
     }
     private func receive(_ e:ASREvent) {
@@ -197,11 +216,17 @@ final class AppModel: ObservableObject {
             case .remove(let id):
                 versions.removeValue(forKey:id)
                 pending.removeAll { $0.id == id }
+                cancelActiveTranslation(for:id,reason:"segment_removed")
                 history.remove(id)
                 if displayedID == id { english = ""; chinese = ""; displayedID = nil }
                 record(["type":"segment_removed", "id":id.uuidString])
                 do { try journal?.remove(id) } catch { fail(error.localizedDescription) }
             case .upsert(let segment):
+                let alreadyTranslating = activeTranslation?.id == segment.id &&
+                    activeTranslation?.revision == segment.revision
+                if activeTranslation?.id == segment.id && !alreadyTranslating {
+                    cancelActiveTranslation(for:segment.id,reason:"newer_revision")
+                }
                 versions[segment.id] = segment.revision
                 pending.removeAll { $0.id == segment.id }
                 history.upsert(segment, limit:historyLimit)
@@ -209,22 +234,40 @@ final class AppModel: ObservableObject {
                 record(["type":"english_segment", "id":segment.id.uuidString,
                         "revision":segment.revision, "text":segment.english, "audio_seconds":lastAudio])
                 do { try journal?.upsert(segment) } catch { fail(error.localizedDescription) }
-                pending.append(segment)
+                if !alreadyTranslating { pending.append(segment) }
             }
         }
-        partial = segmenter.preview
-        if pending.count >= 12 { fail("翻译积压过多，已停止捕获；英文已保存在 transcript。请关闭其他高负载应用后重试。"); return }
-        if pending.count > 2 { status = "翻译积压 \(pending.count) 段" }
+        let preview = segmenter.preview
+        if partial != preview { partial = preview }
+        let translationBacklog = pending.count + (activeTranslation == nil ? 0 : 1)
+        if translationBacklog >= 12 { fail("翻译积压过多，已停止捕获；英文已保存在 transcript。请关闭其他高负载应用后重试。"); return }
+        if translationBacklog > 2 { status = "翻译积压 \(translationBacklog) 段" }
         if translationTask == nil && !pending.isEmpty { translateQueue() }
     }
     private var displayedID: UUID?
+    private func cancelActiveTranslation(for id: UUID, reason: String) {
+        guard let active = activeTranslation, active.id == id else { return }
+        record(["type":"translation_cancelled","id":id.uuidString,
+                "revision":active.revision,"reason":reason])
+        // URLSession.data(for:) observes structured-concurrency cancellation and
+        // closes the obsolete request. The worker token prevents its late cleanup
+        // from clearing a replacement worker that has already started.
+        translationTask?.cancel()
+        translationTask = nil
+        activeTranslation = nil
+        translationWorkerID = nil
+    }
     private func translateQueue() {
         let sessionID = generation
+        let workerID = UUID()
+        translationWorkerID = workerID
         translationTask = Task {
             while !pending.isEmpty, !Task.isCancelled, generation == sessionID {
                 let segment = pending.removeFirst()
+                activeTranslation = segment
                 do {
                     let translated = try await translator.translate(segment.english,glossary:glossary)
+                    guard translationWorkerID == workerID else { break }
                     guard generation == sessionID, !Task.isCancelled else { break }
                     guard versions[segment.id] == segment.revision else { continue }
                     let elapsed = Date().timeIntervalSince(segment.created)
@@ -234,6 +277,7 @@ final class AppModel: ObservableObject {
                     displayedID = segment.id
                     english = segment.english; chinese = translated; latency = String(format:"翻译 %.2f s",elapsed)
                 } catch {
+                    guard translationWorkerID == workerID else { break }
                     if Task.isCancelled { break }
                     guard generation == sessionID, versions[segment.id] == segment.revision else { continue }
                     record(["type":"translation_error","id":segment.id.uuidString,"english":segment.english,"error":error.localizedDescription])
@@ -241,7 +285,11 @@ final class AppModel: ObservableObject {
                     displayedID = segment.id
                     english = segment.english; chinese = "翻译暂不可用 · 英文已保存"; status = error.localizedDescription
                 }
+                if translationWorkerID == workerID { activeTranslation = nil }
             }
+            guard translationWorkerID == workerID else { return }
+            activeTranslation = nil
+            translationWorkerID = nil
             if generation == sessionID { translationTask = nil }
         }
     }
@@ -261,11 +309,17 @@ final class AppModel: ObservableObject {
         if translationTask != nil {
             record(["type":"translation_drain_timeout","remaining":pending.map(\.english)])
             translationTask?.cancel(); translationTask = nil
+            activeTranslation = nil; translationWorkerID = nil
         }
         translator.stop(); pending = []
         record(["type":"session_end","audio_seconds":lastAudio])
+        var journalFailure: String?
+        do { try journal?.finish() }
+        catch { journalFailure = "记录保存失败：\(error.localizedDescription)" }
+        journal = nil
         if let keepAwake { ProcessInfo.processInfo.endActivity(keepAwake) }; keepAwake = nil
-        busy = false; running = false; stopping = false; status = "已停止 · 双语记录已保存"
+        busy = false; running = false; stopping = false
+        status = journalFailure ?? "已停止 · 双语记录已保存"
         if CommandLine.arguments.contains("--headless") { NSApp.terminate(nil) }
     }
     private func record(_ row:[String:Any]) {
@@ -275,13 +329,17 @@ final class AppModel: ObservableObject {
         record(["type":"error","message":message]); status = message
         Task { await stop(); status = message }
     }
-    func shutdown() { sampleTimer?.invalidate(); timer?.invalidate(); startupTask?.cancel(); translationTask?.cancel(); asr?.terminate(); translator.stop() }
+    func shutdown() {
+        sampleTimer?.invalidate(); timer?.invalidate(); startupTask?.cancel(); translationTask?.cancel()
+        translationTask = nil; activeTranslation = nil; translationWorkerID = nil
+        asr?.terminate(); translator.stop(); try? journal?.finish(); journal = nil
+    }
     func openTranscripts() { NSWorkspace.shared.open(transcripts) }
     private func startSample(seconds:Double) throws {
         let data = try Data(contentsOf:resources.appendingPathComponent("sample.f32"))
         guard !data.isEmpty else { throw NSError(domain:"测试音频缺失",code:2) }
         let began = Date(); var cursor = 0; var sent = 0
-        sampleTimer = Timer.scheduledTimer(withTimeInterval:0.02,repeats:true) { [weak self] _ in
+        let playbackTimer = Timer(timeInterval:0.02,repeats:true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 let elapsed = Date().timeIntervalSince(began)
@@ -297,5 +355,7 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+        sampleTimer = playbackTimer
+        RunLoop.main.add(playbackTimer,forMode:.common)
     }
 }

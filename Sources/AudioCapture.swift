@@ -12,6 +12,7 @@ final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
     private let lock = NSLock()
     private var converter: AVAudioConverter?
     private var inputFormat: AVAudioFormat?
+    private var conversionBuffer: AVAudioPCMBuffer?
     private let output = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
     var onPCM: ((Data) -> Void)?
     var onError: ((String) -> Void)?
@@ -41,14 +42,22 @@ final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
         engine.stop()
         if let s = stream { try? await s.stopCapture() }; stream = nil
         await MainActor.run { self.picker?.cancel(); self.picker = nil }
-        lock.withLock { converter = nil; inputFormat = nil }
+        lock.withLock { converter = nil; inputFormat = nil; conversionBuffer = nil }
     }
     private func convert(_ buffer: AVAudioPCMBuffer) {
         lock.lock(); defer { lock.unlock() }
-        if inputFormat != buffer.format { inputFormat = buffer.format; converter = AVAudioConverter(from: buffer.format, to: output) }
+        if inputFormat != buffer.format {
+            inputFormat = buffer.format
+            converter = AVAudioConverter(from: buffer.format, to: output)
+            conversionBuffer = nil
+        }
         guard let converter else { return }
         let count = AVAudioFrameCount(ceil(Double(buffer.frameLength) * 16000 / buffer.format.sampleRate) + 32)
-        guard let target = AVAudioPCMBuffer(pcmFormat: output, frameCapacity: count) else { return }
+        if conversionBuffer == nil || conversionBuffer!.frameCapacity < count {
+            conversionBuffer = AVAudioPCMBuffer(pcmFormat:output,frameCapacity:count)
+        }
+        guard let target = conversionBuffer else { return }
+        target.frameLength = 0
         var supplied = false; var error: NSError?
         converter.convert(to: target, error: &error) { _, status in
             if supplied { status.pointee = .noDataNow; return nil }

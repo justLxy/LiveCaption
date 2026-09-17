@@ -173,11 +173,13 @@ struct Segmenter {
         let tokenizer = NLTokenizer(unit: .sentence)
         tokenizer.setLanguage(.english); tokenizer.string = text
         var result: [Int] = []
+        var wordCount = 0
         tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            wordCount += words(String(text[range])).count
             let sentence = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "\"'”’)]}"))
             if let last = sentence.last, ".!?".contains(last) {
-                result.append(words(String(text[..<range.upperBound])).count)
+                result.append(wordCount)
             }
             return true
         }
@@ -189,6 +191,10 @@ final class TranscriptJournal {
     let directory: URL
     private let json: FileHandle
     private let text: FileHandle
+    private let timestampFormatter = ISO8601DateFormatter()
+    private var jsonDirty = false
+    private var textDirty = false
+    private var closed = false
 
     init(root: URL) throws {
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
@@ -201,9 +207,9 @@ final class TranscriptJournal {
     }
 
     func record(_ values: [String: Any]) throws {
-        var row = values; row["wall_time"] = ISO8601DateFormatter().string(from: Date())
+        var row = values; row["wall_time"] = timestampFormatter.string(from:Date())
         var data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]); data.append(10)
-        try json.write(contentsOf: data); try json.synchronize()
+        try json.write(contentsOf:data); jsonDirty = true
     }
 
     private var order: [UUID] = []
@@ -224,7 +230,7 @@ final class TranscriptJournal {
         order.removeAll { $0 == id }; try rebuildText()
     }
     private func pair(_ segment: CaptionSegment, _ chinese: String) -> String {
-        "[\(ISO8601DateFormatter().string(from: segment.created))]\nEnglish: \(segment.english)\n中文: \(chinese)\n\n"
+        "[\(timestampFormatter.string(from:segment.created))]\nEnglish: \(segment.english)\n中文: \(chinese)\n\n"
     }
     private func rebuildText() throws {
         let contents = order.compactMap { id -> String? in
@@ -232,7 +238,7 @@ final class TranscriptJournal {
             return pair(segment, chinese)
         }.joined()
         try text.truncate(atOffset:0); try text.seek(toOffset:0)
-        try text.write(contentsOf:Data(contents.utf8)); try text.synchronize()
+        try text.write(contentsOf:Data(contents.utf8)); textDirty = true
     }
     func translated(_ segment: CaptionSegment, chinese: String, latency: Double) throws {
         guard segments[segment.id]?.revision == segment.revision else { return }
@@ -242,8 +248,17 @@ final class TranscriptJournal {
                     "buffer_and_translation_seconds":segment.bufferedSeconds + latency])
         translations[segment.id] = chinese
         if segment.revision > 0 { try rebuildText() }
-        else { try text.write(contentsOf: Data(pair(segment, chinese).utf8)); try text.synchronize() }
+        else { try text.write(contentsOf:Data(pair(segment,chinese).utf8)); textDirty = true }
     }
 
-    deinit { try? json.close(); try? text.close() }
+    /// FileHandle writes are immediately visible to readers. A durability sync is
+    /// needed at the session boundary, not after every small real-time event.
+    func finish() throws {
+        guard !closed else { return }
+        if jsonDirty { try json.synchronize(); jsonDirty = false }
+        if textDirty { try text.synchronize(); textDirty = false }
+        try json.close(); try text.close(); closed = true
+    }
+
+    deinit { try? finish() }
 }

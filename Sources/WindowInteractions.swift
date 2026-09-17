@@ -40,14 +40,52 @@ struct ReadingScrollMonitor: NSViewRepresentable {
 /// Explicit hit targets for a borderless panel, independent of subtitle background alpha.
 struct WindowResizeBorder: NSViewRepresentable {
     final class Border: NSView {
-        private let edge: CGFloat = 7
-        private let corner: CGFloat = 18
+        // The whole hit target must contain a non-zero-alpha pixel. Otherwise
+        // WindowServer can discard the transparent outer part before hit testing.
+        private let edge: CGFloat = 10
+        private let paintedEdge: CGFloat = 10
+        private let corner: CGFloat = 20
         private var startFrame = NSRect.zero
         private var startMouse = NSPoint.zero
         private var sides: (left: Bool, right: Bool, bottom: Bool, top: Bool)?
+        private static let risingCursor = makeDiagonalCursor(rising:true)
+        private static let fallingCursor = makeDiagonalCursor(rising:false)
+        private var cursorTrackingAreas: [NSTrackingArea] = []
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
         override var mouseDownCanMoveWindow: Bool { false }
-        private func edges(at p: NSPoint) -> (Bool, Bool, Bool, Bool)? {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { window.invalidateCursorRects(for:self) }
+        }
+        override func setFrameSize(_ newSize: NSSize) {
+            let changed = frame.size != newSize
+            super.setFrameSize(newSize)
+            if changed, let window {
+                needsDisplay = true
+                window.invalidateCursorRects(for:self)
+            }
+        }
+        override func updateTrackingAreas() {
+            for area in cursorTrackingAreas { removeTrackingArea(area) }
+            cursorTrackingAreas.removeAll(keepingCapacity:true)
+            let options: NSTrackingArea.Options = [.activeAlways,.mouseMoved,.cursorUpdate]
+            let regions = [
+                NSRect(x:corner,y:0,width:max(0,bounds.width-2*corner),height:edge),
+                NSRect(x:corner,y:bounds.height-edge,width:max(0,bounds.width-2*corner),height:edge),
+                NSRect(x:0,y:corner,width:edge,height:max(0,bounds.height-2*corner)),
+                NSRect(x:bounds.width-edge,y:corner,width:edge,height:max(0,bounds.height-2*corner)),
+                NSRect(x:0,y:0,width:corner,height:corner),
+                NSRect(x:bounds.width-corner,y:bounds.height-corner,width:corner,height:corner),
+                NSRect(x:0,y:bounds.height-corner,width:corner,height:corner),
+                NSRect(x:bounds.width-corner,y:0,width:corner,height:corner)
+            ]
+            for rect in regions where rect.width > 0 && rect.height > 0 {
+                let area = NSTrackingArea(rect:rect,options:options,owner:self,userInfo:nil)
+                addTrackingArea(area); cursorTrackingAreas.append(area)
+            }
+            super.updateTrackingAreas()
+        }
+        private func edges(at p: NSPoint) -> (left: Bool, right: Bool, bottom: Bool, top: Bool)? {
             guard bounds.contains(p) else { return nil }
             let left = p.x < edge, right = p.x > bounds.width - edge
             let bottom = p.y < edge, top = p.y > bounds.height - edge
@@ -62,10 +100,10 @@ struct WindowResizeBorder: NSViewRepresentable {
             // A zero-alpha window pixel is discarded by WindowServer before hitTest.
             // Keep only the narrow resize perimeter faintly painted, never the center.
             NSColor.white.withAlphaComponent(0.02).setFill()
-            NSRect(x:0,y:0,width:bounds.width,height:edge).fill()
-            NSRect(x:0,y:bounds.height-edge,width:bounds.width,height:edge).fill()
-            NSRect(x:0,y:edge,width:edge,height:max(0,bounds.height-2*edge)).fill()
-            NSRect(x:bounds.width-edge,y:edge,width:edge,height:max(0,bounds.height-2*edge)).fill()
+            NSRect(x:0,y:0,width:bounds.width,height:paintedEdge).fill()
+            NSRect(x:0,y:bounds.height-paintedEdge,width:bounds.width,height:paintedEdge).fill()
+            NSRect(x:0,y:paintedEdge,width:paintedEdge,height:max(0,bounds.height-2*paintedEdge)).fill()
+            NSRect(x:bounds.width-paintedEdge,y:paintedEdge,width:paintedEdge,height:max(0,bounds.height-2*paintedEdge)).fill()
         }
         override func resetCursorRects() {
             addCursorRect(NSRect(x:corner,y:0,width:max(0,bounds.width-2*corner),height:edge),cursor:.resizeUpDown)
@@ -74,10 +112,22 @@ struct WindowResizeBorder: NSViewRepresentable {
             addCursorRect(NSRect(x:bounds.width-edge,y:corner,width:edge,height:max(0,bounds.height-2*corner)),cursor:.resizeLeftRight)
             for (x,y,rising) in [(CGFloat(0),CGFloat(0),true),(bounds.width-corner,bounds.height-corner,true),
                                  (CGFloat(0),bounds.height-corner,false),(bounds.width-corner,CGFloat(0),false)] {
-                addCursorRect(NSRect(x:x,y:y,width:corner,height:corner),cursor:Self.diagonal(rising:rising))
+                addCursorRect(NSRect(x:x,y:y,width:corner,height:corner),
+                              cursor:rising ? Self.risingCursor : Self.fallingCursor)
             }
         }
-        private static func diagonal(rising: Bool) -> NSCursor {
+        override func mouseMoved(with event: NSEvent) { setCursor(for:event) }
+        override func cursorUpdate(with event: NSEvent) { setCursor(for:event) }
+        private func setCursor(for event: NSEvent) {
+            guard let sides = edges(at:convert(event.locationInWindow,from:nil)) else { return }
+            let cursor: NSCursor
+            if (sides.left && sides.bottom) || (sides.right && sides.top) { cursor = Self.risingCursor }
+            else if (sides.left && sides.top) || (sides.right && sides.bottom) { cursor = Self.fallingCursor }
+            else if sides.left || sides.right { cursor = .resizeLeftRight }
+            else { cursor = .resizeUpDown }
+            cursor.set()
+        }
+        private static func makeDiagonalCursor(rising: Bool) -> NSCursor {
             let image = NSImage(size:NSSize(width:20,height:20),flipped:false) { _ in
                 let p = NSBezierPath()
                 func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint { NSPoint(x:x,y:rising ? y : 20-y) }
@@ -115,5 +165,7 @@ struct WindowResizeBorder: NSViewRepresentable {
     func makeNSView(context: Context) -> Border {
         let view = Border(); view.setAccessibilityLabel("拖动窗口边缘调整字幕尺寸"); return view
     }
-    func updateNSView(_ view: Border, context: Context) { view.needsDisplay = true; view.window?.invalidateCursorRects(for:view) }
+    // Border invalidation is driven by AppKit size/window callbacks above, not by
+    // every partial transcript publication from SwiftUI.
+    func updateNSView(_ view: Border, context: Context) {}
 }

@@ -6,12 +6,14 @@ final class AssemblyAIProvider: ASRProvider, @unchecked Sendable {
     var failure: ((String) -> Void)?
     private let queue = DispatchQueue(label:"caption.assemblyai",qos:.userInitiated)
     private let lock = NSLock()
+    private let decoder = JSONDecoder()
     private var accepting = false
     private var backlog = 0
     private var socket: URLSessionWebSocketTask?
     private var session: URLSession?
     private var packetizer = PCM16Packetizer()
     private var packets: [Data] = []
+    private var packetIndex = 0
     private var sending = false
     private var finishing = false
     private var terminated = false
@@ -88,7 +90,10 @@ final class AssemblyAIProvider: ASRProvider, @unchecked Sendable {
     private func pump() {
         guard !terminated, ready, !sending, let socket else { return }
         let message: URLSessionWebSocketTask.Message
-        if !packets.isEmpty { message = .data(packets.removeFirst()) }
+        if packetIndex < packets.count {
+            message = .data(packets[packetIndex]); packetIndex += 1
+            if packetIndex == packets.count { packets.removeAll(keepingCapacity:true); packetIndex = 0 }
+        }
         else if finishing && !terminationSent {
             terminationSent = true; message = .string("{\"type\":\"Terminate\"}")
         } else { return }
@@ -120,7 +125,7 @@ final class AssemblyAIProvider: ASRProvider, @unchecked Sendable {
                     case .data(let bytes): data = bytes
                     @unknown default: self.fail("AssemblyAI 返回了不支持的消息。"); return
                     }
-                    do { self.handle(try JSONDecoder().decode(AssemblyAIMessage.self,from:data)) }
+                    do { self.handle(try self.decoder.decode(AssemblyAIMessage.self,from:data)) }
                     catch { self.fail("AssemblyAI 消息格式不符合当前 v3 协议。"); return }
                     if !self.terminated { self.receive() }
                 }
@@ -164,7 +169,8 @@ final class AssemblyAIProvider: ASRProvider, @unchecked Sendable {
         lock.lock(); accepting = false; backlog = 0; lock.unlock()
         connectTimeout?.cancel(); drainTimeout?.cancel()
         socket?.cancel(with:.normalClosure,reason:nil)
-        session?.invalidateAndCancel(); socket = nil; session = nil; packets = []
+        session?.invalidateAndCancel(); socket = nil; session = nil
+        packets.removeAll(keepingCapacity:false); packetIndex = 0
         event?(ASREvent(type:"drained",text:nil,audio:nil,utterance:nil))
     }
 }

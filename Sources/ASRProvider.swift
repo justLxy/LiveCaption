@@ -54,28 +54,45 @@ struct AssemblyAIMessage: Decodable {
 
 struct PCM16Packetizer {
     private var buffer = Data()
+    private var readOffset = 0
     static let packetBytes = 1600 // 800 samples = 50 ms, raw little-endian PCM16.
     mutating func append(_ floats: Data) -> [Data] {
-        floats.withUnsafeBytes { bytes in
-            for offset in stride(from:0,to:floats.count - floats.count % 4,by:4) {
-                let f = bytes.loadUnaligned(fromByteOffset:offset,as:Float.self)
-                let value = f.isFinite ? min(1,max(-1,f)) : 0
-                var sample = Int16(max(-32768,min(32767,Int((value * 32768).rounded())))).littleEndian
-                withUnsafeBytes(of:&sample) { buffer.append(contentsOf:$0) }
+        let sampleCount = floats.count / MemoryLayout<Float>.size
+        guard sampleCount > 0 else { return [] }
+        var converted = Data(count: sampleCount * MemoryLayout<Int16>.size)
+        converted.withUnsafeMutableBytes { destination in
+            floats.withUnsafeBytes { source in
+                for index in 0..<sampleCount {
+                    let offset = index * MemoryLayout<Float>.size
+                    let outputOffset = index * MemoryLayout<Int16>.size
+                    let value = source.loadUnaligned(fromByteOffset:offset,as:Float.self)
+                    let clipped = value.isFinite ? min(1,max(-1,value)) : 0
+                    let sample = Int16(max(-32768,min(32767,Int((clipped * 32768).rounded())))).littleEndian
+                    destination.storeBytes(of:sample,toByteOffset:outputOffset,as:Int16.self)
+                }
             }
         }
+        buffer.append(converted)
         var packets: [Data] = []
-        while buffer.count >= Self.packetBytes {
-            packets.append(Data(buffer.prefix(Self.packetBytes)))
-            buffer.removeFirst(Self.packetBytes)
+        while buffer.count - readOffset >= Self.packetBytes {
+            let end = readOffset + Self.packetBytes
+            packets.append(buffer.subdata(in:readOffset..<end))
+            readOffset = end
+        }
+        if readOffset == buffer.count {
+            buffer.removeAll(keepingCapacity:true)
+            readOffset = 0
+        } else if readOffset >= Self.packetBytes * 8 {
+            buffer.removeSubrange(0..<readOffset)
+            readOffset = 0
         }
         return packets
     }
     mutating func finish() -> Data? {
-        guard !buffer.isEmpty else { return nil }
-        defer { buffer.removeAll() }
+        guard readOffset < buffer.count else { return nil }
+        defer { buffer.removeAll(keepingCapacity:true); readOffset = 0 }
         // At most 49 ms silence; do not lose the final real samples.
-        var tail = buffer
+        var tail = buffer.subdata(in:readOffset..<buffer.count)
         tail.append(Data(count:Self.packetBytes-tail.count))
         return tail
     }

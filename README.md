@@ -97,7 +97,7 @@ Tests/run-tests.sh
 
 ## 0.5.1 透明窗口
 
-背景 0% 时保留 7pt 的近乎透明边缘缩放区域，四边与角落均可拖动。字幕采用浅色字及深色描边，以兼容白色页面。鼠标悬停时临时显示深色底板和控制栏，移开后恢复设定透明度。开启点击穿透时，窗口不会接收拖动；需先在菜单栏关闭点击穿透。
+背景 0% 时保留 10pt 的近乎透明边缘缩放热区，四边与角落均可拖动。字幕采用浅色字及深色描边，以兼容白色页面。鼠标悬停时临时显示深色底板和控制栏，移开后恢复设定透明度。开启点击穿透时，窗口不会接收拖动；需先在菜单栏关闭点击穿透。
 
 ## 0.5.2 文字配色
 
@@ -126,7 +126,7 @@ Tests/run-tests.sh
 - 停止时发送 `Terminate`，继续读取尾部 Turn，直到 `Termination`，之后才关闭连接。服务器会话最长约 3 小时；服务器结束或网络中断后需手动重新开始。
 - 翻译只调用本机 llama.cpp/Hy-MT2；glossary 仍用于本地翻译，不发送给 AssemblyAI。
 
-AssemblyAI API Key 由用户在设置中填写，并保存到 macOS 钥匙串；不写入偏好设置、字幕记录或日志。`Sources/LocalSecrets.swift` 不再参与构建。
+AssemblyAI API Key 由用户在设置中填写，并保存在 `~/Library/Application Support/XueScribe/Secrets/assemblyai.key`；目录权限为 `0700`，文件权限为 `0600`，不会触发钥匙串授权窗口。Key 不写入偏好设置、字幕记录或日志。`Sources/LocalSecrets.swift` 不再参与构建。
 
 官方来源：
 - https://www.assemblyai.com/docs/streaming/select-the-speech-model
