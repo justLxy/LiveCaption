@@ -34,7 +34,7 @@ final class SystemAudioPicker: NSObject, SCContentSharingPickerObserver {
         pending?.resume(with:result)
     }
     nonisolated func contentSharingPicker(_ picker:SCContentSharingPicker, didCancelFor stream:SCStream?) {
-        Task { @MainActor in self.resolve(.failure(NSError(domain:"LumaCaption",code:1,userInfo:[NSLocalizedDescriptionKey:"已取消系统音频共享。点击开始可重新选择屏幕。"]))) }
+        Task { @MainActor in self.resolve(.failure(NSError(domain:"XueScribe",code:1,userInfo:[NSLocalizedDescriptionKey:"已取消系统音频共享。点击开始可重新选择屏幕。"]))) }
     }
     nonisolated func contentSharingPicker(_ picker:SCContentSharingPicker, didUpdateWith filter:SCContentFilter, for stream:SCStream?) {
         Task { @MainActor in self.resolve(.success(filter)) }

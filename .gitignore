@@ -44,6 +44,7 @@ Package.resolved
 
 # Build artifacts
 LumaCaption.app
+XueScribe.app
 build/
 *.dSYM.zip
 *.dSYM

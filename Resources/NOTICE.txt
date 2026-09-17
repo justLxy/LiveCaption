@@ -1,0 +1,11 @@
+XueScribe Third-Party Notices
+
+Nemotron Speech Streaming English model
+Licensed by NVIDIA Corporation under the NVIDIA Open Model License.
+See Licenses/NVIDIA-English-Model-License.html for the complete terms.
+
+Hy-MT2 model
+Copyright (C) 2026 Tencent. All rights reserved.
+See Licenses/Hy-MT2-LICENSE.txt for the complete terms.
+
+Additional runtime notices and licenses are included in the app bundle.

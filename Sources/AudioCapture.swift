@@ -17,7 +17,7 @@ final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
     var onError: ((String) -> Void)?
     func startMicrophone() async throws {
         let granted = await AVCaptureDevice.requestAccess(for: .audio)
-        guard granted else { throw NSError(domain:"麦克风权限未开启，请在系统设置 → 隐私与安全性 → 麦克风中允许 LumaCaption。",code:1) }
+        guard granted else { throw NSError(domain:"麦克风权限未开启，请在系统设置 → 隐私与安全性 → 麦克风中允许雪笺。",code:1) }
         let node = engine.inputNode, format = engine.inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw NSError(domain:"没有可用的麦克风",code:2) }
         node.installTap(onBus: 0, bufferSize: 960, format: format) { [weak self] b,_ in self?.convert(b) }

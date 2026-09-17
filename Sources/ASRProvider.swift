@@ -16,7 +16,7 @@ enum ASRProviderKind: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     static var initialSelection: Self {
         if CommandLine.arguments.contains("--headless"),
-           let raw = ProcessInfo.processInfo.environment["LUMACAPTION_TEST_PROVIDER"], let kind = Self(rawValue:raw) { return kind }
+           let raw = ProcessInfo.processInfo.environment["XUESCRIBE_TEST_PROVIDER"], let kind = Self(rawValue:raw) { return kind }
         return Self(rawValue:UserDefaults.standard.string(forKey:"asrProvider") ?? "local") ?? .local
     }
     var title: String {

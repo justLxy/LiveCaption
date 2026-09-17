@@ -17,6 +17,7 @@ final class AppModel: ObservableObject {
     @Published var chinese = "点击开始，听见英文，看见中文。"
     @Published var latency = ""
     @Published var provider = ASRProviderKind.initialSelection { didSet { save("asrProvider",provider.rawValue) } }
+    @Published private(set) var hasAssemblyAIKey = KeychainCredentialStore.hasAssemblyAIKey
     @Published var source = UserDefaults.standard.string(forKey:"source") ?? "microphone" { didSet { save("source",source) } }
     @Published var opacity = UserDefaults.standard.object(forKey:"opacity") as? Double ?? 0.78 { didSet { save("opacity",opacity) } }
     @Published var textTone = UserDefaults.standard.string(forKey:"textTone") ?? ((UserDefaults.standard.object(forKey:"opacity") as? Double ?? 0.78) == 0 ? "dark" : "light") { didSet { save("textTone",textTone) } }
@@ -55,7 +56,14 @@ final class AppModel: ObservableObject {
     private var captureStarted: Date?
     private var firstPartial = true
     init() {
-        support = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("LumaCaption")
+        let applicationSupport = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
+        let newSupport = applicationSupport.appendingPathComponent("XueScribe")
+        let legacySupport = applicationSupport.appendingPathComponent("LumaCaption")
+        if !FileManager.default.fileExists(atPath:newSupport.path),
+           FileManager.default.fileExists(atPath:legacySupport.path) {
+            try? FileManager.default.copyItem(at:legacySupport,to:newSupport)
+        }
+        support = newSupport
         transcripts = support.appendingPathComponent("Transcripts")
         try? FileManager.default.createDirectory(at:transcripts,withIntermediateDirectories:true)
     }
@@ -74,6 +82,10 @@ final class AppModel: ObservableObject {
     }
     func selectProvider(_ next: ASRProviderKind) {
         guard next != provider, !busy, !switchingSource, !stopping else { return }
+        if next == .assemblyAI, running, !hasAssemblyAIKey {
+            status = "请先在设置中保存你的 AssemblyAI API Key"
+            return
+        }
         guard running else { provider = next; return }
         switchingSource = true
         Task {
@@ -85,6 +97,15 @@ final class AppModel: ObservableObject {
     }
     func start(sampleSeconds: Double? = nil, preserveHistory:Bool = false) {
         guard !busy, !running else { return }
+        let assemblyAIKey: String?
+        if provider == .assemblyAI {
+            assemblyAIKey = KeychainCredentialStore.assemblyAIKey()
+            guard assemblyAIKey != nil else {
+                hasAssemblyAIKey = false
+                status = "请先在设置中保存你的 AssemblyAI API Key"
+                return
+            }
+        } else { assemblyAIKey = nil }
         busy = true; stopping = false; generation = UUID(); let sessionID = generation
         firstPartial = true; lastAudio = 0; captureStarted = nil
         if !preserveHistory { history = CaptionHistory(); followLatest = true; english = ""; chinese = "" }
@@ -101,7 +122,7 @@ final class AppModel: ObservableObject {
                 let bridge: any ASRProvider
                 switch provider {
                 case .local: bridge = try ASRProcess(resources:resources,log:journal!.directory.appendingPathComponent("asr.log"))
-                case .assemblyAI: bridge = AssemblyAIProvider()
+                case .assemblyAI: bridge = AssemblyAIProvider(apiKey:assemblyAIKey!)
                 }
                 bridge.event = { [weak self] event in DispatchQueue.main.async {
                     guard let self, self.generation == sessionID else { return }
@@ -138,6 +159,16 @@ final class AppModel: ObservableObject {
             } catch is CancellationError { await capture?.stop(); capture = nil; asr?.terminate(); translator.stop() }
             catch { if generation == sessionID { fail(error.localizedDescription) } }
         }
+    }
+    func saveAssemblyAIKey(_ key:String) throws {
+        try KeychainCredentialStore.saveAssemblyAIKey(key)
+        hasAssemblyAIKey = true
+        status = "AssemblyAI API Key 已保存到 macOS 钥匙串"
+    }
+    func deleteAssemblyAIKey() throws {
+        try KeychainCredentialStore.deleteAssemblyAIKey()
+        hasAssemblyAIKey = false
+        if provider == .assemblyAI { status = "AssemblyAI API Key 已删除；本地模式仍可直接使用" }
     }
     private func receive(_ e:ASREvent) {
         if e.type == "drained" { asrDrained = true; return }

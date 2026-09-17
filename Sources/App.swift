@@ -89,7 +89,7 @@ struct SubtitleView: View {
                             model.hideWindow?()
                         }
 
-                        ControlButton(icon: "xmark.circle.fill", help: "退出 LumaCaption") {
+                        ControlButton(icon: "xmark.circle.fill", help: "退出雪笺") {
                             model.quitApp?()
                         }
                     }
@@ -172,10 +172,24 @@ struct FontSizeControl: View {
 
 struct PreferencesView: View {
     @ObservedObject var model:AppModel
+    @State private var assemblyAIKey = ""
+    @State private var keyMessage = ""
     var body: some View {
         ScrollView {
         VStack(alignment:.leading,spacing:20) {
-            HStack { VStack(alignment:.leading,spacing:5) { Text("LumaCaption").font(.system(size:25,weight:.semibold)); Text("本地 / 云端识别 · 本地中文翻译").foregroundStyle(.secondary) }; Spacer(); Image(systemName:"captions.bubble").font(.system(size:32)).foregroundStyle(.mint) }
+            HStack(spacing:14) {
+                Image(nsImage:NSApp.applicationIconImage)
+                    .resizable().scaledToFit().frame(width:52,height:52)
+                    .accessibilityHidden(true)
+                VStack(alignment:.leading,spacing:3) {
+                    HStack(alignment:.firstTextBaseline,spacing:8) {
+                        Text("雪笺").font(.system(size:25,weight:.semibold))
+                        Text("XueScribe").font(.system(size:13,weight:.medium)).foregroundStyle(.secondary)
+                    }
+                    Text("Turn speech into text, quietly.").font(.system(size:13)).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
             Form {
                 Picker("显示模式",selection:$model.displayMode) { Text("单句字幕").tag("single"); Text("长段转录与翻译").tag("history") }
                 if model.displayMode == "history" {
@@ -187,6 +201,28 @@ struct PreferencesView: View {
                 }.disabled(model.busy || model.switchingSource)
                 Text(model.provider == .local ? "音频与中文翻译均在本机处理。" : "音频实时发送至 AssemblyAI；中文仍由本机 Hy-MT2 翻译。")
                     .font(.caption).foregroundStyle(.secondary)
+                VStack(alignment:.leading,spacing:7) {
+                    HStack {
+                        SecureField(model.hasAssemblyAIKey ? "已保存；输入新 Key 可替换" : "粘贴 AssemblyAI API Key",text:$assemblyAIKey)
+                            .textFieldStyle(.roundedBorder)
+                        Button("保存 Key") {
+                            do {
+                                try model.saveAssemblyAIKey(assemblyAIKey)
+                                assemblyAIKey = ""; keyMessage = "已安全保存到 macOS 钥匙串"
+                            } catch { keyMessage = error.localizedDescription }
+                        }.disabled(assemblyAIKey.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
+                        if model.hasAssemblyAIKey {
+                            Button("删除",role:.destructive) {
+                                do {
+                                    try model.deleteAssemblyAIKey()
+                                    assemblyAIKey = ""; keyMessage = "已从钥匙串删除"
+                                } catch { keyMessage = error.localizedDescription }
+                            }
+                        }
+                    }
+                    Text(keyMessage.isEmpty ? (model.hasAssemblyAIKey ? "Cloud Key 已保存，不会写入偏好设置或日志。" : "只有选择 Cloud 时才会使用；默认 Local 不需要 Key。") : keyMessage)
+                        .font(.caption).foregroundStyle(keyMessage.hasPrefix("无法") ? .red : .secondary)
+                }
                 Picker("音频来源",selection:Binding(get:{ model.source },set:{ model.selectSource($0) })) { Text("麦克风").tag("microphone"); Text("Mac 系统音频").tag("system") }.disabled(model.busy || model.switchingSource)
                 HStack { Text("背景不透明度"); Slider(value:$model.opacity,in:0...1); Text("\(Int(model.opacity*100))%").monospacedDigit().frame(width:40) }
                 Picker("文字颜色",selection:$model.textTone) {
@@ -220,7 +256,7 @@ struct PreferencesView: View {
 
 @MainActor
 final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
-    let model = AppModel()
+    lazy var model = AppModel()
     var panel:SubtitlePanel!
     var settings:NSWindow?
     var item:NSStatusItem!
@@ -228,6 +264,8 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     var handler:EventHandlerRef?
     var terminationSignals:[DispatchSourceSignal] = []
     func applicationDidFinishLaunching(_ notification:Notification) {
+        migrateLegacyPreferences()
+        let model = self.model
         NSApp.setActivationPolicy(.accessory)
         panel = SubtitlePanel(contentRect:NSRect(x:160,y:120,width:800,height:238),styleMask:[.borderless,.resizable,.nonactivatingPanel],backing:.buffered,defer:false)
         panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = false
@@ -235,9 +273,9 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         panel.level = .floating; panel.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary]
         panel.minSize = NSSize(width:360,height:165); panel.delegate = self
         panel.contentView = NSHostingView(rootView:SubtitleView(model:model))
-        if !panel.setFrameUsingName("LumaCaption.Subtitles") { panel.center(); if let screen = panel.screen { var f = panel.frame; f.origin.y = screen.visibleFrame.minY+70; panel.setFrame(f,display:false) } }
+        if !panel.setFrameUsingName("XueScribe.Subtitles"), !panel.setFrameUsingName("LumaCaption.Subtitles") { panel.center(); if let screen = panel.screen { var f = panel.frame; f.origin.y = screen.visibleFrame.minY+70; panel.setFrame(f,display:false) } }
         if !NSScreen.screens.contains(where:{$0.visibleFrame.intersects(panel.frame)}) { panel.center() }
-        panel.setFrameAutosaveName("LumaCaption.Subtitles")
+        panel.setFrameAutosaveName("XueScribe.Subtitles")
         model.windowChange = { [weak self] in self?.updatePanel() }
         model.showSettings = { [weak self] in self?.openSettings() }
         model.hideWindow = { [weak self] in self?.panel.orderOut(nil) }
@@ -245,20 +283,20 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         updatePanel()
         if !CommandLine.arguments.contains("--headless") { panel.orderFrontRegardless() }
         item = NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName:"captions.bubble",accessibilityDescription:"LumaCaption")
+        item.button?.image = NSImage(systemSymbolName:"captions.bubble",accessibilityDescription:"雪笺")
         let menu = NSMenu()
         add(menu,"显示 / 隐藏字幕  ⌥⌘S",#selector(togglePanel))
         add(menu,"开始 / 停止字幕",#selector(toggleRecording))
         add(menu,"设置与术语表…",#selector(openSettings))
         add(menu,"切换点击穿透",#selector(toggleThrough))
         add(menu,"打开双语记录",#selector(openTranscripts))
-        menu.addItem(.separator()); add(menu,"退出 LumaCaption",#selector(quit),key:"q")
+        menu.addItem(.separator()); add(menu,"退出雪笺",#selector(quit),key:"q")
         item.menu = menu
         if CommandLine.arguments.contains("--headless") { NSStatusBar.system.removeStatusItem(item) }
         let appMenu = NSMenu(); let root = NSMenuItem(); appMenu.addItem(root)
         let submenu = NSMenu(); root.submenu = submenu
         add(submenu,"设置…",#selector(openSettings),key:",")
-        add(submenu,"退出 LumaCaption",#selector(quit),key:"q")
+        add(submenu,"退出雪笺",#selector(quit),key:"q")
         NSApp.mainMenu = appMenu
         var spec = EventTypeSpec(eventClass:OSType(kEventClassKeyboard),eventKind:UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _,_,userData in
@@ -276,6 +314,14 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         let args = CommandLine.arguments
         if let index = args.firstIndex(of:"--sample-seconds"),args.count > index+1,let seconds = Double(args[index+1]) { model.start(sampleSeconds:seconds) }
     }
+    func migrateLegacyPreferences() {
+        let defaults = UserDefaults.standard
+        guard let legacy = defaults.persistentDomain(forName:"local.lumacaption.mac") else { return }
+        let keys = ["displayMode","historyLimit","asrProvider","source","opacity","textTone","englishFontSize","fontSize","showEnglish","showChinese","glossary"]
+        for key in keys where defaults.object(forKey:key) == nil {
+            if let value = legacy[key] { defaults.set(value,forKey:key) }
+        }
+    }
     func add(_ menu:NSMenu,_ title:String,_ action:Selector,key:String = "") { let entry = NSMenuItem(title:title,action:action,keyEquivalent:key);entry.target = self;menu.addItem(entry) }
     func updatePanel() { panel.ignoresMouseEvents = model.clickThrough; panel.level = model.onTop ? .floating : .normal
         if model.displayMode == "history", panel.frame.height < 420 {
@@ -289,16 +335,16 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     @objc func toggleThrough() { model.clickThrough.toggle() }
     @objc func openTranscripts() { model.openTranscripts() }
     @objc func openSettings() {
-        if settings == nil { settings = NSWindow(contentRect:NSRect(x:0,y:0,width:572,height:660),styleMask:[.titled,.closable],backing:.buffered,defer:false);settings!.title = "LumaCaption 设置";settings!.isReleasedWhenClosed = false; settings!.level = NSWindow.Level(rawValue:NSWindow.Level.floating.rawValue+1); settings!.contentView = NSHostingView(rootView:PreferencesView(model:model));settings!.center() }
+        if settings == nil { settings = NSWindow(contentRect:NSRect(x:0,y:0,width:572,height:660),styleMask:[.titled,.closable],backing:.buffered,defer:false);settings!.title = "雪笺设置";settings!.isReleasedWhenClosed = false; settings!.level = NSWindow.Level(rawValue:NSWindow.Level.floating.rawValue+1); settings!.contentView = NSHostingView(rootView:PreferencesView(model:model));settings!.center() }
         settings!.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)
     }
     @objc func quit() { Task { await model.stop(); NSApp.terminate(nil) } }
     func applicationWillTerminate(_ notification:Notification) { model.shutdown(); if let hotKey { UnregisterEventHotKey(hotKey) }; if let handler { RemoveEventHandler(handler) } }
-    func windowDidMove(_ notification:Notification) { panel.saveFrame(usingName:"LumaCaption.Subtitles") }
-    func windowDidResize(_ notification:Notification) { panel.saveFrame(usingName:"LumaCaption.Subtitles") }
+    func windowDidMove(_ notification:Notification) { panel.saveFrame(usingName:"XueScribe.Subtitles") }
+    func windowDidResize(_ notification:Notification) { panel.saveFrame(usingName:"XueScribe.Subtitles") }
 }
 
 @main
-struct LumaCaptionMain {
+struct XueScribeMain {
     @MainActor static func main() { let app = NSApplication.shared; let delegate = AppDelegate();app.delegate = delegate;withExtendedLifetime(delegate) { app.run() } }
 }

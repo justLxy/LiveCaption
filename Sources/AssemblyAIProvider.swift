@@ -19,6 +19,9 @@ final class AssemblyAIProvider: ASRProvider, @unchecked Sendable {
     private var terminationSent = false
     private var connectTimeout: DispatchWorkItem?
     private var drainTimeout: DispatchWorkItem?
+    private let apiKey: String
+
+    init(apiKey: String) { self.apiKey = apiKey }
 
     static func request(key: String) -> URLRequest {
         var url = URLComponents(string:"wss://streaming.assemblyai.com/v3/ws")!
@@ -43,7 +46,7 @@ final class AssemblyAIProvider: ASRProvider, @unchecked Sendable {
             config.timeoutIntervalForResource = 24 * 60 * 60
             let session = URLSession(configuration:config)
             self.session = session
-            let socket = session.webSocketTask(with:Self.request(key:LocalSecrets.assemblyAIKey))
+            let socket = session.webSocketTask(with:Self.request(key:apiKey))
             self.socket = socket
             let timeout = DispatchWorkItem { [weak self] in self?.fail("AssemblyAI 连接超时，请检查网络。") }
             connectTimeout = timeout; queue.asyncAfter(deadline:.now()+20,execute:timeout)

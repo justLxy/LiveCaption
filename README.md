@@ -1,4 +1,6 @@
-# LumaCaption
+# 雪笺 XueScribe
+
+> Turn speech into text, quietly.
 
 实时英文语音字幕与中文翻译工具。默认使用本地 Nemotron，也可选 AssemblyAI 云端实时识别；中文翻译始终使用本地 Hy-MT2。
 
@@ -6,7 +8,7 @@
 
 捕获英文语音（麦克风或 Mac 系统音频）→ 实时识别为英文字幕 → 智能断句 → 翻译为中文字幕
 
-- 识别 Provider：Nemotron 本地 Metal 推理，或 AssemblyAI 云端实时识别；仅选择 Cloud 时上传音频
+- 识别 Provider：默认使用 Nemotron 本地 Metal 推理；也可由用户填写自己的 AssemblyAI API Key 使用云端实时识别，仅选择 Cloud 时上传音频
 - 实时字幕：边听边显示，悬浮窗支持置顶、穿透、透明度调节
 - 稳定断句：结合真实更新中的稳定前缀、模型标点和 endpoint，避免按时间硬切
 - 双语记录：自动保存完整的英中双语记录（JSONL + TXT）
@@ -29,7 +31,7 @@
 
 ## 使用方法
 
-1. 双击 `LumaCaption.app` 启动
+1. 双击 `XueScribe.app` 启动
 2. 点击菜单栏图标 → 设置，选择 ASR Provider 与音频源（麦克风或系统音频）
 3. 点击"开始字幕"
 4. 使用快捷键 ⌥⌘S 显示/隐藏字幕窗口
@@ -78,7 +80,7 @@ Tests/run-tests.sh
 
 - 本机 ad-hoc 签名，非 Developer ID 公证签名
 - 模型标点不保证语义完整；endpoint 后达到等待预算时可能输出短语；连续无标点发言可能等待更久。最终修订会更新原字幕段并重新翻译，不会作为重复的新句追加。不能保证 ASR 或翻译模型完全准确
-- 双语记录保存在 `~/Library/Application Support/LumaCaption/Transcripts/`
+- 双语记录保存在 `~/Library/Application Support/XueScribe/Transcripts/`；首次启动新版时会复制旧 `LumaCaption` 目录中的记录
 
 ## 0.5 断句与修订
 
@@ -124,7 +126,7 @@ Tests/run-tests.sh
 - 停止时发送 `Terminate`，继续读取尾部 Turn，直到 `Termination`，之后才关闭连接。服务器会话最长约 3 小时；服务器结束或网络中断后需手动重新开始。
 - 翻译只调用本机 llama.cpp/Hy-MT2；glossary 仍用于本地翻译，不发送给 AssemblyAI。
 
-API key 按要求硬编码在本地 `Sources/LocalSecrets.swift`，该文件已排除 Git 跟踪；日志不包含 key、认证头或原始错误响应。重新构建时需保留此文件。
+AssemblyAI API Key 由用户在设置中填写，并保存到 macOS 钥匙串；不写入偏好设置、字幕记录或日志。`Sources/LocalSecrets.swift` 不再参与构建。
 
 官方来源：
 - https://www.assemblyai.com/docs/streaming/select-the-speech-model
@@ -132,4 +134,4 @@ API key 按要求硬编码在本地 `Sources/LocalSecrets.swift`，该文件已�
 - https://www.assemblyai.com/docs/streaming/message-sequence
 - https://www.assemblyai.com/docs/streaming/common-session-errors-and-closures
 
-测试模式可运行 `LUMACAPTION_TEST_PROVIDER=assemblyAI ./LumaCaption.app/Contents/MacOS/LumaCaption --headless --sample-seconds 12`，仅发送 App 内置样例，不录麦克风，不改变保存的 Provider 偏好；将环境变量改成 `local` 可验证本地路径。
+测试模式可运行 `XUESCRIBE_TEST_PROVIDER=assemblyAI ./XueScribe.app/Contents/MacOS/XueScribe --headless --sample-seconds 12`，仅发送 App 内置样例，不录麦克风，不改变保存的 Provider 偏好；将环境变量改成 `local` 可验证本地路径。
